@@ -22,7 +22,7 @@
       "run": [
         "/bin/ecos"
       ],
-      "source_url": "https://github.com/Metta-AI/cogame-ecos/tree/main"
+      "source_url": "https://github.com/softmax-universe/cogame-ecos/tree/main"
     },
     "config_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -353,7 +353,7 @@
           "cpu": "1"
         }
       },
-      "source_url": "https://github.com/Metta-AI/cogame-ecos/tree/main"
+      "source_url": "https://github.com/softmax-universe/cogame-ecos/tree/main"
     },
     {
       "id": "ecos-steward",
@@ -373,7 +373,7 @@
           "cpu": "1"
         }
       },
-      "source_url": "https://github.com/Metta-AI/cogame-ecos/tree/main",
+      "source_url": "https://github.com/softmax-universe/cogame-ecos/tree/main",
       "env": {
         "PLAYER_SCRIPTED": "steward"
       }
@@ -396,7 +396,7 @@
           "cpu": "1"
         }
       },
-      "source_url": "https://github.com/Metta-AI/cogame-ecos/tree/main",
+      "source_url": "https://github.com/softmax-universe/cogame-ecos/tree/main",
       "env": {
         "PLAYER_SCRIPTED": "opportunist"
       }
