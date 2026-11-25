@@ -146,9 +146,18 @@ proc broadcastLocked(gs: var GameState, fromTick: int) =
   ## Callers hold stateLock.
   let stepped = gs.sim.recentEventsJson(fromTick)
   for socket in gs.globalSockets:
-    gs.sendBoard(socket, stepped)
+    try:
+      gs.sendBoard(socket, stepped)
+    except CatchableError:
+      discard
   for slot, socket in gs.playerSockets:
-    socket.send($gs.sim.observationJson(slot))
+    try:
+      socket.send($gs.sim.observationJson(slot))
+    except CatchableError as error:
+      if gs.started and not gs.finished and gs.failedSlot < 0:
+        gs.failedSlot = slot
+        gs.failureCategory = "infra_error"
+        gs.failureReason = "player disconnected: " & error.msg
 
 # ---- artifacts ---------------------------------------------------------------
 
@@ -306,33 +315,32 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
         break
       sleep(200)
 
-    var anyConnected = false
+    var connectedCount = 0
     var allConnected = false
     var missingSlot = -1
     withLock stateLock:
       state.started = true
-      anyConnected = state.playerSockets.len > 0
-      allConnected = state.playerSockets.len >= config.tokens.len
+      connectedCount = state.playerSockets.len
+      allConnected = connectedCount >= config.tokens.len
       for slot in 0 ..< config.tokens.len:
         if not state.playerSockets.hasKey(slot):
           missingSlot = slot
           break
-      logLine("ecos: starting with " & $state.playerSockets.len & "/" &
+      logLine("ecos: starting with " & $connectedCount & "/" &
         $config.tokens.len & " seats connected")
       state.broadcastLocked(0)
 
-    if not anyConnected and config.tokens.len > 0:
-      logLine("ecos: no seat connected within " &
-        $config.playerConnectTimeoutSeconds & "s; forfeiting")
-      withLock stateLock:
-        state.sim.forfeit()
-      finishEpisode(runtimeConfig)
-      return
-
     if not allConnected and config.tokens.len > 0:
-      failEpisode(runtimeConfig, missingSlot, "infra_error",
-        "seat " & $missingSlot & " did not connect within " &
-        $config.playerConnectTimeoutSeconds & "s")
+      let reason =
+        if connectedCount == 0:
+          "no seats connected within " &
+            $config.playerConnectTimeoutSeconds & "s"
+        else:
+          "seat " & $missingSlot & " did not connect within " &
+            $config.playerConnectTimeoutSeconds & "s (" & $connectedCount &
+            "/" & $config.tokens.len & " seats connected)"
+      failEpisode(runtimeConfig, (if connectedCount == 0: -1 else: missingSlot),
+        "infra_error", reason)
       return
 
     ## The platform kills an episode that outruns its timeout and keeps
@@ -362,27 +370,61 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
 
     while true:
       let seats = @[0, 1, 2]
+      var preFailedSlot = -1
+      var preFailureCategory = ""
+      var preFailureReason = ""
+      var preFailureRaw = ""
+      var finishedLoop = false
       withLock stateLock:
         if state.sim.done:
-          break
-        if epochTime() + generationReserve > playDeadline:
+          finishedLoop = true
+        elif state.failedSlot >= 0:
+          preFailedSlot = state.failedSlot
+          preFailureCategory = state.failureCategory
+          preFailureReason = state.failureReason
+          preFailureRaw = state.failureRaw
+        elif epochTime() + generationReserve > playDeadline:
           logLine("ecos: play deadline reached after " &
             $state.sim.generationsPlayed & "/" & $config.generations &
             " generations; ending early")
           state.sim.endEarly()
           state.broadcastLocked(state.sim.tick)
-          break
-        state.pendingGeneration = state.sim.generation
-        state.actionReceived = newSeq[bool](seats.len)
-        for slot, socket in state.playerSockets:
-          socket.send($ %*{
-            "type": "decision",
-            "protocol": PlayerProtocol,
-            "prompt_config": {"promptVariant": $state.selection.variant, "promptSeed": state.selection.seed},
-            "generation": state.pendingGeneration,
-            "timeout_ms": config.actionTimeoutSeconds * 1000,
-            "view": state.sim.observationJson(slot)
-          })
+          finishedLoop = true
+        else:
+          state.pendingGeneration = state.sim.generation
+          state.actionReceived = newSeq[bool](seats.len)
+          for slot in seats:
+            if not state.playerSockets.hasKey(slot):
+              state.failedSlot = slot
+              state.failureCategory = "infra_error"
+              state.failureReason = "player disconnected"
+              preFailedSlot = slot
+              preFailureCategory = state.failureCategory
+              preFailureReason = state.failureReason
+              break
+            try:
+              state.playerSockets[slot].send($ %*{
+                "type": "decision",
+                "protocol": PlayerProtocol,
+                "prompt_config": {"promptVariant": $state.selection.variant, "promptSeed": state.selection.seed},
+                "generation": state.pendingGeneration,
+                "timeout_ms": config.actionTimeoutSeconds * 1000,
+                "view": state.sim.observationJson(slot)
+              })
+            except CatchableError as error:
+              state.failedSlot = slot
+              state.failureCategory = "infra_error"
+              state.failureReason = "player disconnected: " & error.msg
+              preFailedSlot = slot
+              preFailureCategory = state.failureCategory
+              preFailureReason = state.failureReason
+              break
+      if finishedLoop:
+        break
+      if preFailedSlot >= 0:
+        failEpisode(runtimeConfig, preFailedSlot, preFailureCategory,
+          preFailureReason, preFailureRaw)
+        return
 
       ## All seats receive the same boundary before any doctrine is applied.
       let batchStart = epochTime()

@@ -139,6 +139,12 @@ when isMainModule:
   doAssert not manifest["game"]["runnable"].hasKey("env"),
     "model credentials belong to players, not the game"
 
+  var allowedReasons: HashSet[string]
+  for item in manifest{"game"}{"results_schema"}{"properties"}{"reason"}{"enum"}:
+    allowedReasons.incl(item.getStr())
+  doAssert allowedReasons == ["complete", "deadline"].toHashSet(),
+    "results_schema.reason must not include forfeit: " & $allowedReasons
+
   # ---- docs and protocols --------------------------------------------------
   doAssert manifest{"game"}{"docs"}{"readme"}{"type"}.getStr() == "text"
   doAssert manifest{"game"}{"docs"}{"readme"}{"value"}.getStr().len > 200

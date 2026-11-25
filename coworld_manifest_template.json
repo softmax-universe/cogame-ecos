@@ -161,7 +161,7 @@
         },
         "playerConnectTimeoutSeconds": {
           "type": "integer",
-          "description": "How long to wait for the three seats before starting anyway.",
+          "description": "How long to wait for all three seats to connect before failing the episode unscored.",
           "minimum": 1,
           "default": 180
         },
@@ -289,13 +289,12 @@
           "type": "string",
           "enum": [
             "complete",
-            "deadline",
-            "forfeit"
+            "deadline"
           ]
         },
         "ending": {
           "type": "string",
-          "description": "ten_generations | collapse_grass | collapse_grazers | collapse_predators | deadline | forfeit"
+          "description": "ten_generations | collapse_grass | collapse_grazers | collapse_predators | deadline"
         }
       }
     },
