@@ -21,8 +21,6 @@ type
 
   DoctrineSource* = enum
     dsLlm = "llm"
-    dsRetry = "retry"
-    dsFallback = "fallback"
     dsScripted = "scripted"
 
   EcosEvent* = object

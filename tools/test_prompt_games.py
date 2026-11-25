@@ -108,9 +108,6 @@ def play(
                     assert view["notes"] == marker * 399 + "…"
                 proposal["say"] = marker * 90
                 proposal["notes"] = marker * 430
-                proposal["doctrine"] = {
-                    key: str(value) for key, value in proposal["doctrine"].items()
-                }
             if clamp:
                 limits = observation["action_schema"]["properties"]["doctrine"][
                     "properties"
@@ -137,9 +134,7 @@ def play(
                     action["say"] == marker * 63 + "…"
                     and action["notes"] == marker * 399 + "…"
                 )
-                assert action["doctrine"] == {
-                    key: int(value) for key, value in proposal["doctrine"].items()
-                }
+                assert action["doctrine"] == proposal["doctrine"]
             else:
                 assert action == proposal
             fields = tuple(action["doctrine"].values())

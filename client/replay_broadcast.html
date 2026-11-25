@@ -3505,7 +3505,7 @@ body[data-noviewpanel] #viewpanel { display: none !important; }
       '<span class="who ' + team + '">' + esc(who) + '</span>' +
       '<span class="badge doctrine">' + esc(parts.join(' · ')) + '</span>' +
       (e.say ? '<span class="say">“' + esc(e.say) + '”</span>' : '') +
-      (e.source === 'fallback' || e.source === 'scripted'
+      (e.source === 'scripted'
         ? '<span class="badge auto">auto</span>' : '') +
       (e.clamped ? '<span class="badge">clamped</span>' : '');
     if (e.notes) row.title = e.notes;

@@ -14,8 +14,8 @@ const
 
 type
   EcosThrottleError* = object of EcosError
-    ## A 429 from the player sidecar. The player sends a steward fallback
-    ## action for this generation and can make a fresh call next generation.
+    ## A 429 from the player sidecar. Surfacing this error lets the player
+    ## report an infrastructure failure instead of substituting a fallback move.
 
   LlmTransport = enum
     ltNone, ltSidecar, ltBedrock, ltAnthropic
@@ -92,22 +92,51 @@ proc newLlmClient*(maxOutputTokens: int, model: string): LlmClient =
   else:
     result.transport = ltNone
     result.disabled = true
-    logLine("ecos llm: no LLM credentials; every seat plays the steward baseline")
+    logLine("ecos llm: no LLM credentials configured")
 
 # ---- transport ---------------------------------------------------------------
 
+proc unwrapSingleCodeFence(text: string): string =
+  let trimmed = text.strip()
+  if not trimmed.startsWith("```"):
+    return trimmed
+  let firstNewline = trimmed.find('\n')
+  if firstNewline < 0:
+    raise newException(EcosInvalidActionError,
+      "unclosed markdown code fence in response")
+  let fenceTag = trimmed[3 ..< firstNewline].strip().toLowerAscii()
+  if fenceTag.len > 0 and fenceTag != "json":
+    raise newException(EcosInvalidActionError,
+      "unsupported markdown code fence language: " & fenceTag)
+  let rest = trimmed[firstNewline + 1 .. ^1]
+  if not rest.endsWith("```"):
+    raise newException(EcosInvalidActionError,
+      "unclosed markdown code fence or trailing text after fence")
+  let body = rest[0 ..< rest.len - 3]
+  if body.len > 0 and body[^1] != '\n' and body[^1] != '\r':
+    raise newException(EcosInvalidActionError,
+      "closing markdown code fence must be on its own line")
+  body.strip()
+
 proc extractJsonObject*(text: string): JsonNode =
-  ## Pulls the first {...} object out of a model response, tolerating fences
-  ## and prose prefixes.
-  let start = text.find('{')
-  let stop = text.rfind('}')
-  if start < 0 or stop <= start:
+  ## Parses exactly one JSON object, either bare or inside a single ordinary
+  ## outer Markdown code fence (plain or ```json). Rejects surrounding prose,
+  ## extra objects, and non-object JSON values.
+  let candidate = unwrapSingleCodeFence(text)
+  if candidate.len == 0:
+    raise newException(EcosInvalidActionError, "empty JSON response")
+  try:
+    result = parseJson(candidate)
+  except CatchableError as error:
     var head = text.strip()
     if head.len > 160:
       head = head[0 ..< 160] & "..."
-    raise newException(EcosError,
-      "no JSON object in response: " & head.replace("\n", " "))
-  parseJson(text[start .. stop])
+    raise newException(EcosInvalidActionError,
+      "invalid JSON object in response (" & error.msg & "): " &
+      head.replace("\n", " "))
+  if result.kind != JObject:
+    raise newException(EcosInvalidActionError,
+      "response must be a single JSON object")
 
 proc requestFor(client: LlmClient, system, user: string, slot: int):
     tuple[url: string, headers: HttpHeaders, body: string] =
@@ -165,12 +194,12 @@ proc textOf*(client: LlmClient, response: Response, error, url: string): string 
       response.body[0 .. min(response.body.high, 300)])
   let payload = parseJson(response.body)
   if payload{"stop_reason"}.getStr() == "refusal":
-    raise newException(EcosError, "llm refusal")
+    raise newException(EcosInvalidActionError, "llm refusal")
   for contentBlock in payload{"content"}:
     if contentBlock{"type"}.getStr() == "text":
       result.add(contentBlock{"text"}.getStr())
   if payload{"stop_reason"}.getStr() == "max_tokens" and '{' notin result:
-    raise newException(EcosError, "reply cut off at max_tokens before any " &
+    raise newException(EcosInvalidActionError, "reply cut off at max_tokens before any " &
       "JSON: " & result[0 .. min(result.high, 160)].replace("\n", " "))
 
 proc playerPrompts*(view: JsonNode, prompt: string, selection: PromptSelection):

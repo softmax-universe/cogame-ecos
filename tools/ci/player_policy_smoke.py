@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Run one native mixed Ecos episode with stub player-side model endpoints."""
+"""Run native Ecos host+player round-trip episodes covering valid bare/fenced JSON,
+invalid/ambiguous replies, provider failures, and missing credentials."""
 
 import json
 import os
@@ -13,35 +14,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 GAME, PLAYER = sys.argv[1:3]
-requests = {"prompt": 0}
-
-
-class Stub(BaseHTTPRequestHandler):
-    def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        assert self.path == "/v1/messages"
-        assert body["model"] == "anthropic/claude-haiku-4.5"
-        assert "anthropic_version" not in body
-        assert body["system"] == (
-            "Reply with ONLY one JSON object containing the four-integer doctrine for the next generation. "
-            "In Ecos you control the grazers species, pursuing integrated biomass without collapsing the food chain."
-        )
-        requests["prompt"] += 1
-        assert self.headers["x-coworld-player-slot"] == "1"
-        reply = {"content": [{"type": "text", "text": json.dumps({
-            "doctrine": {"birth_threshold": 110, "bite": 8,
-                         "flee_range": 90, "herd": 55},
-            "say": "keeping balance", "notes": "stub reply"
-        })}], "stop_reason": "end_turn"}
-        encoded = json.dumps(reply).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(encoded)))
-        self.end_headers()
-        self.wfile.write(encoded)
-
-    def log_message(self, *_args):
-        pass
 
 
 def free_port():
@@ -50,68 +22,177 @@ def free_port():
         return sock.getsockname()[1]
 
 
-model = ThreadingHTTPServer(("127.0.0.1", free_port()), Stub)
-threading.Thread(target=model.serve_forever, daemon=True).start()
-port = free_port()
-with tempfile.TemporaryDirectory(prefix="ecos-policy-") as scratch:
-    root = Path(scratch)
-    config = {"tokens": ["token-0", "token-1", "token-2"],
-              "players": [{"name": name} for name in ("Sedge", "Bramble", "Quill")],
-              "num_agents": 3, "seed": 7, "roleOffset": 0,
-              "promptVariant": "mixed", "promptSeed": 4,
-              "generations": 2, "ticksPerGeneration": 10,
-              "actionTimeoutSeconds": 5, "minTurnSeconds": 0,
-              "playerConnectTimeoutSeconds": 10, "shutdownGraceSeconds": 0}
-    (root / "config.json").write_text(json.dumps(config))
-    game_env = os.environ.copy()
-    game_env.update({"COGAME_HOST": "127.0.0.1", "COGAME_PORT": str(port),
-                     "COGAME_CONFIG_URI": (root / "config.json").as_uri(),
-                     "COGAME_RESULTS_URI": (root / "results.json").as_uri(),
-                     "COGAME_SAVE_REPLAY_URI": (root / "replay.json").as_uri()})
-    game = subprocess.Popen([GAME], env=game_env, stdout=(root / "game.log").open("w"),
-                            stderr=subprocess.STDOUT)
-    players = []
-    try:
-        for _ in range(100):
-            if game.poll() is not None:
-                raise AssertionError((root / "game.log").read_text())
-            with socket.socket() as probe:
-                if probe.connect_ex(("127.0.0.1", port)) == 0:
-                    break
-            time.sleep(0.05)
-        else:
-            raise AssertionError("game health unavailable")
-        for slot, settings in enumerate((
-            {"PLAYER_SCRIPTED": "opportunist"},
-            {"PLAYER_PROMPT": "Keep the ecosystem balanced."},
-            {"PLAYER_SCRIPTED": "steward"},
-        )):
-            env = os.environ.copy()
-            env.update(settings)
-            env.update({"COWORLD_PLAYER_WS_URL":
-                        f"ws://127.0.0.1:{port}/player?slot={slot}&token=token-{slot}",
-                        "COWORLD_LLM_ENDPOINT":
-                        f"http://127.0.0.1:{model.server_port}"})
-            players.append(subprocess.Popen([PLAYER], env=env,
-                           stdout=(root / f"player-{slot}.log").open("w"),
-                           stderr=subprocess.STDOUT))
-        assert game.wait(timeout=35) == 0, (root / "game.log").read_text()
-        for slot, player in enumerate(players):
-            assert player.wait(timeout=5) == 0, (root / f"player-{slot}.log").read_text()
-        results = json.loads((root / "results.json").read_text())
-        replay = json.loads((root / "replay.json").read_text())
-        assert requests == {"prompt": 2}, requests
-        events = replay["events"]
-        doctrines = [event for event in events if event["k"] == "doctrine"]
-        sources = [event["source"] for event in doctrines]
-        assert sources.count("llm") == 2, sources
-        assert sources.count("scripted") == 4, sources
-        assert sources.count("fallback") == 0, sources
-        assert results["reason"] == "complete", results
-        print("ecos player smoke: 2 prompt replies, 4 scripted actions, zero fallback")
-    finally:
-        for process in [*players, game]:
-            if process.poll() is None:
-                process.terminate()
-                process.wait(timeout=5)
-        model.shutdown()
+def run_episode(reply_fn=None, with_endpoint=True, expect_failure=False):
+    requests = {"prompt": 0}
+    model = None
+    if with_endpoint:
+        class Stub(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                assert self.path == "/v1/messages"
+                assert body["model"] == "anthropic/claude-haiku-4.5"
+                assert "anthropic_version" not in body
+                assert body["system"] == (
+                    "Reply with ONLY one JSON object containing the four-integer doctrine for the next generation. "
+                    "In Ecos you control the grazers species, pursuing integrated biomass without collapsing the food chain."
+                )
+                requests["prompt"] += 1
+                assert self.headers["x-coworld-player-slot"] == "1"
+                outcome = reply_fn(requests["prompt"])
+                if isinstance(outcome, tuple):
+                    status, payload = outcome
+                    encoded = payload.encode()
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(encoded)))
+                    self.end_headers()
+                    self.wfile.write(encoded)
+                else:
+                    reply = {"content": [{"type": "text", "text": outcome}], "stop_reason": "end_turn"}
+                    encoded = json.dumps(reply).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(encoded)))
+                    self.end_headers()
+                    self.wfile.write(encoded)
+
+            def log_message(self, *_args):
+                pass
+
+        model = ThreadingHTTPServer(("127.0.0.1", free_port()), Stub)
+        threading.Thread(target=model.serve_forever, daemon=True).start()
+
+    port = free_port()
+    with tempfile.TemporaryDirectory(prefix="ecos-policy-") as scratch:
+        root = Path(scratch)
+        config = {"tokens": ["token-0", "token-1", "token-2"],
+                  "players": [{"name": name} for name in ("Sedge", "Bramble", "Quill")],
+                  "num_agents": 3, "seed": 7, "roleOffset": 0,
+                  "promptVariant": "mixed", "promptSeed": 4,
+                  "generations": 2, "ticksPerGeneration": 10,
+                  "actionTimeoutSeconds": 5, "minTurnSeconds": 0,
+                  "playerConnectTimeoutSeconds": 10, "shutdownGraceSeconds": 0}
+        (root / "config.json").write_text(json.dumps(config))
+        game_env = os.environ.copy()
+        game_env.update({"COGAME_HOST": "127.0.0.1", "COGAME_PORT": str(port),
+                         "COGAME_CONFIG_URI": (root / "config.json").as_uri(),
+                         "COGAME_RESULTS_URI": (root / "results.json").as_uri(),
+                         "COGAME_SAVE_REPLAY_URI": (root / "replay.json").as_uri(),
+                         "COGAME_PLAYER_FAILURE_URI": (root / "player_failure.json").as_uri(),
+                         "COGAME_LOG_URI": (root / "episode.log").as_uri()})
+        game = subprocess.Popen([GAME], env=game_env, stdout=(root / "game.log").open("w"),
+                                stderr=subprocess.STDOUT)
+        players = []
+        try:
+            for _ in range(100):
+                if game.poll() is not None:
+                    raise AssertionError((root / "game.log").read_text())
+                with socket.socket() as probe:
+                    if probe.connect_ex(("127.0.0.1", port)) == 0:
+                        break
+                time.sleep(0.05)
+            else:
+                raise AssertionError("game health unavailable")
+            for slot, settings in enumerate((
+                {"PLAYER_SCRIPTED": "opportunist"},
+                {"PLAYER_PROMPT": "Keep the ecosystem balanced."},
+                {"PLAYER_SCRIPTED": "steward"},
+            )):
+                env = os.environ.copy()
+                for key in ("COWORLD_LLM_ENDPOINT", "ANTHROPIC_API_KEY",
+                            "ANTHROPIC_API_KEY_URI", "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
+                            "AWS_BEARER_TOKEN_BEDROCK"):
+                    env.pop(key, None)
+                env.update(settings)
+                env["COWORLD_PLAYER_WS_URL"] = (
+                    f"ws://127.0.0.1:{port}/player?slot={slot}&token=token-{slot}"
+                )
+                if model is not None:
+                    env["COWORLD_LLM_ENDPOINT"] = f"http://127.0.0.1:{model.server_port}"
+                players.append(subprocess.Popen([PLAYER], env=env,
+                               stdout=(root / f"player-{slot}.log").open("w"),
+                               stderr=subprocess.STDOUT))
+            game_rc = game.wait(timeout=35)
+            player_rcs = [player.wait(timeout=5) for player in players]
+            results_path = root / "results.json"
+            replay_path = root / "replay.json"
+            failure_path = root / "player_failure.json"
+            log_text = (root / "episode.log").read_text() if (root / "episode.log").exists() else ""
+            if expect_failure:
+                assert game_rc != 0, f"expected failed episode exit != 0, got 0:\n{(root / 'game.log').read_text()}"
+                assert player_rcs[1] != 0, f"expected failing player exit != 0, got {player_rcs}"
+                assert player_rcs[0] == 0 and player_rcs[2] == 0, f"innocent seats should exit 0, got {player_rcs}"
+                assert not results_path.exists(), f"failed episode must not write numeric results: {results_path.read_text()}"
+                assert not replay_path.exists(), "failed episode must not write scored replay"
+                assert failure_path.exists(), f"missing player_failure.json:\n{(root / 'game.log').read_text()}"
+                failure = json.loads(failure_path.read_text())
+                assert "scores" not in failure and "win" not in failure, failure
+                return requests, failure, log_text
+            else:
+                assert game_rc == 0, (root / "game.log").read_text()
+                for slot, rc in enumerate(player_rcs):
+                    assert rc == 0, (root / f"player-{slot}.log").read_text()
+                assert not failure_path.exists(), failure_path.read_text()
+                results = json.loads(results_path.read_text())
+                replay = json.loads(replay_path.read_text())
+                return requests, results, replay
+        finally:
+            for process in [*players, game]:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=5)
+            if model is not None:
+                model.shutdown()
+
+
+valid_payload = json.dumps({
+    "doctrine": {"birth_threshold": 110, "bite": 8,
+                 "flee_range": 90, "herd": 55},
+    "say": "keeping balance", "notes": "stub reply"
+})
+
+# 1. Valid replies (bare JSON on gen 1, single ```json fence on gen 2) complete cleanly.
+requests, results, replay = run_episode(
+    lambda n: valid_payload if n == 1 else f"```json\n{valid_payload}\n```"
+)
+assert requests == {"prompt": 2}, requests
+doctrines = [event for event in replay["events"] if event["k"] == "doctrine"]
+sources = [event["source"] for event in doctrines]
+assert sources.count("llm") == 2, sources
+assert sources.count("scripted") == 4, sources
+assert sources.count("fallback") == 0, sources
+assert results["reason"] == "complete", results
+assert len(results["scores"]) == 3 and all(isinstance(s, (int, float)) for s in results["scores"]), results
+
+# 2. Ambiguous prose around JSON is rejected and terminates unscored with invalid_action diagnostics.
+requests, failure, log_text = run_episode(
+    lambda _n: f"Here is my doctrine:\n{valid_payload}",
+    expect_failure=True,
+)
+assert requests == {"prompt": 1}, requests
+assert failure["status"] == "failed", failure
+assert failure["slot"] == 1 and failure["seat"] == "Bramble" and failure["role"] == "grazers", failure
+assert failure["category"] == "invalid_action", failure
+assert "invalid JSON object" in failure["reason"], failure
+assert "terminated unscored" in log_text, log_text
+
+# 3. Provider HTTP failure (500) terminates unscored with infra_error diagnostics and no numeric results.
+requests, failure, log_text = run_episode(
+    lambda _n: (500, '{"error":{"message":"upstream unavailable"}}'),
+    expect_failure=True,
+)
+assert requests == {"prompt": 1}, requests
+assert failure["status"] == "failed", failure
+assert failure["slot"] == 1 and failure["category"] == "infra_error", failure
+assert "500" in failure["reason"], failure
+assert "terminated unscored" in log_text, log_text
+
+# 4. Missing credentials on a prompt player terminates unscored with infra_error diagnostics and no numeric results.
+requests, failure, log_text = run_episode(with_endpoint=False, expect_failure=True)
+assert requests == {"prompt": 0}, requests
+assert failure["status"] == "failed", failure
+assert failure["slot"] == 1 and failure["category"] == "infra_error", failure
+assert failure["reason"] == "no LLM credentials configured", failure
+assert "terminated unscored" in log_text, log_text
+
+print("ecos player smoke: valid bare/fenced replies pass; invalid reply, provider failure, and missing credentials terminate unscored with diagnostics")

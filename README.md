@@ -56,8 +56,15 @@ coworld upload-policy coworld-ecos:latest --name my-ecos-baseline \
   --run /bin/ecos-player --secret-env PLAYER_SCRIPTED=steward
 ```
 
-Players need their own inference credential or hosted sidecar for prompt calls.
-With no credential or a failed call, the player sends a steward fallback action. Missing or invalid actions also fall back in the game.
+Players need their own inference credential or the Coworld native LLM sidecar
+(`COWORLD_LLM_ENABLED=true`, default `COWORLD_LLM_MODEL=anthropic/claude-haiku-4.5`
+on `ecos-player`) for prompt calls. Release certification seats `ecos-player`
+alongside `ecos-steward` and `ecos-opportunist`; offline Docker smoke
+(`tools/ci/docker_smoke.sh`) separately nominates scripted seats via
+`SMOKE_PLAYERS`. Missing credentials, failed calls, invalid replies, timeouts,
+or disconnects terminate the unfinished episode unscored with failure
+diagnostics rather than substituting a fallback move or inventing a forfeit
+score.
 
 Seats see only the aliases `Sedge`, `Bramble` and `Quill` and their role names.
 Policy names exist spectator-side only — in the replay, the scorebug and
@@ -73,7 +80,7 @@ Policy names exist spectator-side only — in the replay, the scorebug and
 | `src/ecos/sim.nim` | the ten numbered tick rules, the generation clock, scoring |
 | `src/ecos/events.nim` | the replay's event vocabulary |
 | `src/ecos/scripted.nim` | the `steward` and `opportunist` baselines |
-| `src/ecos/decision.nim` | doctrine parsing and fallback decisions |
+| `src/ecos/decision.nim` | strict doctrine parsing and validation |
 | `src/ecos/llm.nim` | player-side prompt transport and parsing |
 | `src/ecos/replays.nim` | the `ecos.replay.v1` writer, reader and playhead |
 | `src/ecos/global.nim` | the sprite-protocol board renderer |

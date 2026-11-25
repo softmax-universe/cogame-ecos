@@ -1,7 +1,7 @@
-## Complete doctrine parsing and game-owned fallback, without inference.
+## Complete doctrine parsing and validation, without inference or fallbacks.
 
-import std/[json, math, strutils, unicode]
-import sim_types, sim, scripted, events
+import std/[json, strutils, unicode]
+import sim_types, events
 
 type
   Decision* = object
@@ -27,46 +27,50 @@ proc cleanSay*(text: string): string =
 proc cleanNotes*(text: string): string =
   cleanText(text, MaxNotesLen)
 
-proc numberOf(node: JsonNode, name: string): int =
-  ## A doctrine value may arrive as an integer, a numeric string or a float.
+proc intField(node: JsonNode, name: string): int =
+  ## A doctrine value must be a JSON integer.
   if node.isNil or node.kind == JNull:
-    raise newException(EcosError, "doctrine field missing: " & name)
-  case node.kind
-  of JInt: node.getInt()
-  of JFloat: int(round(node.getFloat()))
-  of JBool: raise newException(EcosError, "doctrine field is not a number: " & name)
-  of JString:
-    let text = node.getStr().strip()
-    try:
-      int(round(parseFloat(text)))
-    except ValueError:
-      raise newException(EcosError,
-        "doctrine field is not a number: " & name & "=" & text)
-  else:
-    raise newException(EcosError, "doctrine field is not a number: " & name)
+    raise newException(EcosInvalidActionError, "doctrine field missing: " & name)
+  if node.kind != JInt:
+    raise newException(EcosInvalidActionError,
+      "doctrine field must be an integer: " & name)
+  node.getInt()
 
-proc parseDecision*(species: Species, payload: JsonNode): Decision =
-  ## Tolerant: extra keys are ignored, `doctrine` may also be inlined at the
-  ## top level. A missing or non-numeric field is an INVALID reply; an
-  ## out-of-range one is clamped and recorded as such.
-  result.say = cleanSay(payload{"say"}.getStr())
-  result.notes = cleanNotes(payload{"notes"}.getStr())
-  var source = payload{"doctrine"}
-  if source.isNil or source.kind != JObject:
-    source = payload
+proc optionalStringField(payload: JsonNode, name: string): string =
+  if not payload.hasKey(name):
+    return ""
+  let node = payload[name]
+  if node.kind != JString:
+    raise newException(EcosInvalidActionError, name & " must be a string")
+  node.getStr()
+
+proc parseDecision*(species: Species, payload: JsonNode,
+    allowWireFields = false): Decision =
+  ## Strict parser: requires a JSON object with a `doctrine` object containing
+  ## exactly the four integer fields for `species`, plus optional string `say`
+  ## and `notes`. Out-of-range integers are clamped and recorded as such.
+  if payload.isNil or payload.kind != JObject:
+    raise newException(EcosInvalidActionError,
+      "decision payload must be a JSON object")
+  for key, _ in payload.pairs:
+    if key in ["doctrine", "say", "notes"]:
+      continue
+    if allowWireFields and key in ["type", "generation", "source", "latency_ms"]:
+      continue
+    raise newException(EcosInvalidActionError, "unexpected decision field: " & key)
+  result.say = cleanSay(optionalStringField(payload, "say"))
+  result.notes = cleanNotes(optionalStringField(payload, "notes"))
+  if not payload.hasKey("doctrine") or payload["doctrine"].kind != JObject:
+    raise newException(EcosInvalidActionError,
+      "decision must contain a doctrine object")
+  let source = payload["doctrine"]
+  if source.len != 4:
+    raise newException(EcosInvalidActionError,
+      "doctrine must contain exactly 4 fields for " & RoleNames[species])
   var raw: Doctrine
   for i in 0 .. 3:
     let name = DoctrineFieldNames[species][i]
-    raw[i] = numberOf(source{name}, name)
+    raw[i] = intField(source{name}, name)
   let checked = clampDoctrine(species, raw)
   result.fields = checked.fields
   result.clamped = checked.clamped
-
-proc scriptedDecision*(sim: SimServer, species: Species,
-    kind: ScriptKind): Decision =
-  let checked = scriptedDoctrineChecked(sim, species, kind)
-  Decision(
-    fields: checked.fields,
-    clamped: checked.clamped,
-    source: (if kind == skNone: dsFallback else: dsScripted)
-  )

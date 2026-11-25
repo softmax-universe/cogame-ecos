@@ -24,7 +24,7 @@ import bitworld/runtime
 import curly
 import mummy
 import mummy/routers
-import sim_types, sim_config, sim, sim_state, events, scripted, decision,
+import sim_types, sim_config, sim, sim_state, events, decision,
   replays, global, broadcast, prompts
 
 type
@@ -35,6 +35,10 @@ type
     pendingGeneration: int
     decisions: seq[Decision]
     actionReceived: seq[bool]
+    failedSlot: int
+    failureCategory: string
+    failureReason: string
+    failureRaw: string
     playerSockets: Table[int, WebSocket]
     socketSlots: Table[WebSocket, int]
     globalSockets: HashSet[WebSocket]
@@ -223,6 +227,68 @@ proc finishEpisode(runtimeConfig: RuntimeConfig) =
   logLine("ecos: episode complete, shutting down")
   quit(0)
 
+proc failEpisode(runtimeConfig: RuntimeConfig, slot: int,
+    category, reason: string, raw = "") =
+  ## Terminate an unfinished episode unscored with failure diagnostics and no
+  ## gameplay results or invented winner.
+  var failureJson: JsonNode
+  withLock stateLock:
+    if state.finished:
+      return
+    state.finished = true
+    let generation = state.sim.generation
+    let seatName =
+      if slot >= 0 and slot < state.sim.names.len: state.sim.names[slot]
+      else: ""
+    let roleName =
+      if slot >= 0 and slot < state.sim.roleOf.len:
+        RoleNames[state.sim.roleOf[slot]]
+      else: ""
+    failureJson = %*{
+      "status": "failed",
+      "slot": slot,
+      "seat": seatName,
+      "role": roleName,
+      "generation": generation,
+      "category": category,
+      "reason": reason
+    }
+    if raw.len > 0:
+      failureJson["raw"] = %raw
+    logLine("ecos: episode failed (category=" & category & ", slot=" & $slot &
+      ", gen=" & $generation & "): " & reason)
+    var notice = %*{
+      "type": "failed",
+      "done": true,
+      "failed_slot": slot,
+      "generation": generation,
+      "category": category,
+      "reason": reason
+    }
+    for playerSlot, socket in state.playerSockets:
+      notice["slot"] = %playerSlot
+      try:
+        socket.send($notice)
+      except CatchableError:
+        discard
+
+  sleep(200)
+  let failureUri = getEnv("COGAME_PLAYER_FAILURE_URI").strip()
+  if failureUri.len > 0:
+    try:
+      writeArtifact(failureUri, $failureJson, "application/json",
+        "COGAME_PLAYER_FAILURE_METHOD")
+    except CatchableError as error:
+      logLine("ecos: player failure artifact failed: " & error.msg)
+  logLine("ecos: unfinished episode terminated unscored without results")
+  if runtimeConfig.logUri.len > 0:
+    try:
+      writeArtifact(runtimeConfig.logUri, gameLogText(), "text/plain",
+        "COGAME_LOG_METHOD")
+    except CatchableError as error:
+      logLine("ecos: log artifact failed: " & error.msg)
+  quit(1)
+
 # ---- the generation loop -----------------------------------------------------
 
 proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
@@ -241,9 +307,16 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
       sleep(200)
 
     var anyConnected = false
+    var allConnected = false
+    var missingSlot = -1
     withLock stateLock:
       state.started = true
       anyConnected = state.playerSockets.len > 0
+      allConnected = state.playerSockets.len >= config.tokens.len
+      for slot in 0 ..< config.tokens.len:
+        if not state.playerSockets.hasKey(slot):
+          missingSlot = slot
+          break
       logLine("ecos: starting with " & $state.playerSockets.len & "/" &
         $config.tokens.len & " seats connected")
       state.broadcastLocked(0)
@@ -254,6 +327,12 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
       withLock stateLock:
         state.sim.forfeit()
       finishEpisode(runtimeConfig)
+      return
+
+    if not allConnected and config.tokens.len > 0:
+      failEpisode(runtimeConfig, missingSlot, "infra_error",
+        "seat " & $missingSlot & " did not connect within " &
+        $config.playerConnectTimeoutSeconds & "s")
       return
 
     ## The platform kills an episode that outruns its timeout and keeps
@@ -310,32 +389,58 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
       let decisionDeadline = batchStart + float(config.actionTimeoutSeconds)
       while epochTime() < decisionDeadline:
         var complete = true
+        var failed = false
         withLock stateLock:
-          for slot in seats:
-            if state.playerSockets.hasKey(slot) and
-                not state.actionReceived[slot]:
-              complete = false
-        if complete:
+          if state.failedSlot >= 0:
+            failed = true
+          else:
+            for slot in seats:
+              if not state.actionReceived[slot]:
+                complete = false
+        if failed or complete:
           break
         sleep(20)
 
+      var failedSlot = -1
+      var failureCategory = ""
+      var failureReason = ""
+      var failureRaw = ""
       var fromTick = 0
       withLock stateLock:
-        fromTick = state.sim.tick
-        for slot in seats:
-          let decision =
-            if state.actionReceived[slot]: state.decisions[slot]
-            else: scriptedDecision(state.sim, state.sim.roleOf[slot], skNone)
-          let species = state.sim.roleOf[slot]
-          logLine("ecos: gen " & $state.sim.generation & " " &
-            state.sim.names[slot] & " (" & RoleNames[species] & ") " &
-            $decision.fields & " via " & $decision.source &
-            (if decision.say.len > 0: " says \"" & decision.say & "\"" else: ""))
-          state.sim.applyDoctrine(species, decision.fields, decision.source,
-            decision.clamped, decision.say, decision.notes, decision.latencyMs)
-        state.sim.runGeneration()
-        logLine("ecos: " & state.sim.summaryLine())
-        state.broadcastLocked(fromTick)
+        if state.failedSlot >= 0:
+          failedSlot = state.failedSlot
+          failureCategory = state.failureCategory
+          failureReason = state.failureReason
+          failureRaw = state.failureRaw
+        else:
+          var timedOutSlot = -1
+          for slot in seats:
+            if not state.actionReceived[slot]:
+              timedOutSlot = slot
+              break
+          if timedOutSlot >= 0:
+            failedSlot = timedOutSlot
+            failureCategory = "infra_error"
+            failureReason = "action timed out after " &
+              $config.actionTimeoutSeconds & "s"
+        if failedSlot < 0:
+          fromTick = state.sim.tick
+          for slot in seats:
+            let decision = state.decisions[slot]
+            let species = state.sim.roleOf[slot]
+            logLine("ecos: gen " & $state.sim.generation & " " &
+              state.sim.names[slot] & " (" & RoleNames[species] & ") " &
+              $decision.fields & " via " & $decision.source &
+              (if decision.say.len > 0: " says \"" & decision.say & "\"" else: ""))
+            state.sim.applyDoctrine(species, decision.fields, decision.source,
+              decision.clamped, decision.say, decision.notes, decision.latencyMs)
+          state.sim.runGeneration()
+          logLine("ecos: " & state.sim.summaryLine())
+          state.broadcastLocked(fromTick)
+      if failedSlot >= 0:
+        failEpisode(runtimeConfig, failedSlot, failureCategory, failureReason,
+          failureRaw)
+        return
 
       ## Floor the spacing between generation starts for sidecar rate limits.
       let elapsed = epochTime() - batchStart
@@ -450,25 +555,62 @@ proc websocketHandler(websocket: WebSocket, event: WebSocketEvent,
         return
       try:
         let payload = parseJson(message.data)
-        if payload{"type"}.getStr() == "action":
+        if payload.kind != JObject:
+          raise newException(EcosError, "player frame must be a JSON object")
+        case payload{"type"}.getStr()
+        of "action":
+          if not payload.hasKey("generation") or payload["generation"].kind != JInt:
+            raise newException(EcosError, "action generation must be an integer")
           let generation = payload["generation"].getInt()
-          var decision = parseDecision(state.sim.roleOf[slot], payload)
-          case payload{"source"}.getStr()
+          var decision = parseDecision(state.sim.roleOf[slot], payload,
+            allowWireFields = true)
+          if not payload.hasKey("source") or payload["source"].kind != JString:
+            raise newException(EcosError, "action source must be a string")
+          case payload["source"].getStr()
           of "scripted": decision.source = dsScripted
-          of "fallback": decision.source = dsFallback
           of "llm": decision.source = dsLlm
-          else: raise newException(EcosError, "unknown action source")
-          decision.latencyMs = payload{"latency_ms"}.getInt(0)
+          else: raise newException(EcosError, "unknown action source: " &
+            payload["source"].getStr())
+          if payload.hasKey("latency_ms"):
+            if payload["latency_ms"].kind != JInt:
+              raise newException(EcosError, "latency_ms must be an integer")
+            decision.latencyMs = payload["latency_ms"].getInt()
           withLock stateLock:
             if generation == state.pendingGeneration and
                 not state.actionReceived[slot]:
               state.decisions[slot] = decision
               state.actionReceived[slot] = true
+        of "error":
+          let category =
+            if payload.hasKey("category") and payload["category"].kind == JString and
+                payload["category"].getStr() in ["infra_error", "invalid_action"]:
+              payload["category"].getStr()
+            else:
+              "infra_error"
+          let reason =
+            if payload.hasKey("reason") and payload["reason"].kind == JString:
+              payload["reason"].getStr()
+            else:
+              "player reported failure"
+          logLine("ecos: seat " & $slot & " reported " & category & ": " & reason)
+          withLock stateLock:
+            if state.started and not state.finished and state.failedSlot < 0:
+              state.failedSlot = slot
+              state.failureCategory = category
+              state.failureReason = reason
         else:
-          logLine("ecos: ignoring frame of type " &
-            payload{"type"}.getStr("?") & " from seat " & $slot)
+          raise newException(EcosInvalidActionError,
+            "unexpected player frame type: " & payload{"type"}.getStr("?"))
       except CatchableError as error:
-        logLine("ecos: ignoring bad player frame: " & error.msg)
+        logLine("ecos: rejecting player frame from seat " & $slot & ": " & error.msg)
+        withLock stateLock:
+          if state.started and not state.finished and state.failedSlot < 0:
+            state.failedSlot = slot
+            state.failureCategory = "invalid_action"
+            state.failureReason = error.msg
+            state.failureRaw =
+              if message.data.len > 500: message.data[0 ..< 500]
+              else: message.data
     of ErrorEvent:
       discard
     of CloseEvent:
@@ -478,6 +620,11 @@ proc websocketHandler(websocket: WebSocket, event: WebSocketEvent,
           state.socketSlots.del(websocket)
           if state.playerSockets.getOrDefault(slot) == websocket:
             state.playerSockets.del(slot)
+            if state.started and not state.finished and state.failedSlot < 0:
+              logLine("ecos: seat " & $slot & " disconnected; failing episode")
+              state.failedSlot = slot
+              state.failureCategory = "infra_error"
+              state.failureReason = "player disconnected"
         state.globalSockets.excl(websocket)
         state.viewers.del(websocket)
 
@@ -510,6 +657,10 @@ proc runGameServer*(config: GameConfig, runtimeConfig: RuntimeConfig) =
   state.sim = newSim(config)
   state.decisions = newSeq[Decision](config.players.len)
   state.actionReceived = newSeq[bool](config.players.len)
+  state.failedSlot = -1
+  state.failureCategory = ""
+  state.failureReason = ""
+  state.failureRaw = ""
 
   gameServer = newServer(buildRouter(), websocketHandler)
   createThread(gameThread, runGame, runtimeConfig)
