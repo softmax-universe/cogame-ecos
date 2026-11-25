@@ -236,11 +236,31 @@ proc finishEpisode(runtimeConfig: RuntimeConfig) =
   logLine("ecos: episode complete, shutting down")
   quit(0)
 
+const MaxPlayerFailureMessageLen = 2000
+
+proc playerFailureKind*(category: string): string =
+  if category == "invalid_action": "player_error"
+  else: "episode_inconclusive"
+
+proc playerFailurePayload*(slot: int, category, reason: string): JsonNode =
+  ## Build Coworld's closed GamePlayerFailure JSON object for an attributed seat.
+  ## Returns nil when no concrete seat can be attributed (slot < 0).
+  if slot < 0:
+    return nil
+  var message = cleanText(reason, MaxPlayerFailureMessageLen)
+  if message.len == 0:
+    message = "player failure"
+  %*{
+    "failed_policy_index": slot,
+    "message": message,
+    "kind": playerFailureKind(category)
+  }
+
 proc failEpisode(runtimeConfig: RuntimeConfig, slot: int,
     category, reason: string, raw = "") =
   ## Terminate an unfinished episode unscored with failure diagnostics and no
   ## gameplay results or invented winner.
-  var failureJson: JsonNode
+  var failureJson: JsonNode = nil
   withLock stateLock:
     if state.finished:
       return
@@ -253,19 +273,13 @@ proc failEpisode(runtimeConfig: RuntimeConfig, slot: int,
       if slot >= 0 and slot < state.sim.roleOf.len:
         RoleNames[state.sim.roleOf[slot]]
       else: ""
-    failureJson = %*{
-      "status": "failed",
-      "slot": slot,
-      "seat": seatName,
-      "role": roleName,
-      "generation": generation,
-      "category": category,
-      "reason": reason
-    }
-    if raw.len > 0:
-      failureJson["raw"] = %raw
-    logLine("ecos: episode failed (category=" & category & ", slot=" & $slot &
+    let kind = playerFailureKind(category)
+    failureJson = playerFailurePayload(slot, category, reason)
+    logLine("ecos: episode failed (category=" & category & ", kind=" & kind &
+      ", slot=" & $slot & ", seat=" & seatName & ", role=" & roleName &
       ", gen=" & $generation & "): " & reason)
+    if raw.len > 0:
+      logLine("ecos: rejected player frame (slot=" & $slot & "): " & raw)
     var notice = %*{
       "type": "failed",
       "done": true,
@@ -283,7 +297,7 @@ proc failEpisode(runtimeConfig: RuntimeConfig, slot: int,
 
   sleep(200)
   let failureUri = getEnv("COGAME_PLAYER_FAILURE_URI").strip()
-  if failureUri.len > 0:
+  if failureUri.len > 0 and not failureJson.isNil:
     try:
       writeArtifact(failureUri, $failureJson, "application/json",
         "COGAME_PLAYER_FAILURE_METHOD")

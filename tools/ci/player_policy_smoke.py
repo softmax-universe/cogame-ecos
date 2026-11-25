@@ -24,6 +24,7 @@ def free_port():
 
 
 def run_episode(reply_fn=None, with_endpoint=True, expect_failure=False,
+                expect_failure_artifact=True,
                 seat_slots=(0, 1, 2), connect_timeout=10,
                 kill_slot_after_requests=None):
     requests = {"prompt": 0}
@@ -143,10 +144,16 @@ def run_episode(reply_fn=None, with_endpoint=True, expect_failure=False,
                         assert player_rcs[innocent] == 0, f"innocent seat {innocent} should exit 0, got {player_rcs}"
                 assert not results_path.exists(), f"failed episode must not write numeric results: {results_path.read_text()}"
                 assert not replay_path.exists(), "failed episode must not write scored replay"
-                assert failure_path.exists(), f"missing player_failure.json:\n{(root / 'game.log').read_text()}"
-                failure = json.loads(failure_path.read_text())
-                assert "scores" not in failure and "win" not in failure, failure
-                return requests, failure, log_text
+                if expect_failure_artifact:
+                    assert failure_path.exists(), f"missing player_failure.json:\n{(root / 'game.log').read_text()}"
+                    failure = json.loads(failure_path.read_text())
+                    assert set(failure.keys()) == {"failed_policy_index", "message", "kind"}, failure
+                    assert isinstance(failure["failed_policy_index"], int) and failure["failed_policy_index"] >= 0, failure
+                    assert isinstance(failure["message"], str) and 1 <= len(failure["message"]) <= 2000, failure
+                    assert failure["kind"] in ("player_error", "episode_inconclusive"), failure
+                    return requests, failure, log_text
+                assert not failure_path.exists(), f"unattributed failure must not invent a seat: {failure_path.read_text()}"
+                return requests, None, log_text
             else:
                 assert game_rc == 0, (root / "game.log").read_text()
                 for slot, rc in player_rcs.items():
@@ -186,51 +193,51 @@ assert sources.count("fallback") == 0, sources
 assert results["reason"] == "complete", results
 assert len(results["scores"]) == 3 and all(isinstance(s, (int, float)) for s in results["scores"]), results
 
-# 2. Ambiguous prose around JSON is rejected and terminates unscored with invalid_action diagnostics.
+# 2. Ambiguous prose around JSON is rejected and terminates unscored with player_error.
 requests, failure, log_text = run_episode(
     lambda _n: f"Here is my doctrine:\n{valid_payload}",
     expect_failure=True,
 )
 assert requests == {"prompt": 1}, requests
-assert failure["status"] == "failed", failure
-assert failure["slot"] == 1 and failure["seat"] == "Bramble" and failure["role"] == "grazers", failure
-assert failure["category"] == "invalid_action", failure
-assert "invalid JSON object" in failure["reason"], failure
+assert failure["failed_policy_index"] == 1, failure
+assert failure["kind"] == "player_error", failure
+assert "invalid JSON object" in failure["message"], failure
+assert "seat=Bramble" in log_text and "role=grazers" in log_text, log_text
 assert "terminated unscored" in log_text, log_text
 
-# 3. Provider HTTP failure (500) terminates unscored with infra_error diagnostics and no numeric results.
+# 3. Provider HTTP failure (503) terminates unscored with episode_inconclusive and no numeric results.
 requests, failure, log_text = run_episode(
-    lambda _n: (500, '{"error":{"message":"upstream unavailable"}}'),
+    lambda _n: (503, '{"error":{"message":"upstream unavailable"}}'),
     expect_failure=True,
 )
 assert requests == {"prompt": 1}, requests
-assert failure["status"] == "failed", failure
-assert failure["slot"] == 1 and failure["category"] == "infra_error", failure
-assert "500" in failure["reason"], failure
+assert failure["failed_policy_index"] == 1, failure
+assert failure["kind"] == "episode_inconclusive", failure
+assert "503" in failure["message"], failure
 assert "terminated unscored" in log_text, log_text
 
-# 4. Missing credentials on a prompt player terminates unscored with infra_error diagnostics and no numeric results.
+# 4. Missing credentials on a prompt player terminates unscored with episode_inconclusive and no numeric results.
 requests, failure, log_text = run_episode(with_endpoint=False, expect_failure=True)
 assert requests == {"prompt": 0}, requests
-assert failure["status"] == "failed", failure
-assert failure["slot"] == 1 and failure["category"] == "infra_error", failure
-assert failure["reason"] == "no LLM credentials configured", failure
+assert failure["failed_policy_index"] == 1, failure
+assert failure["kind"] == "episode_inconclusive", failure
+assert failure["message"] == "no LLM credentials configured", failure
 assert "terminated unscored" in log_text, log_text
 
-# 5. Zero seats connected at startup terminates unscored with infra_error diagnostics (no forfeit/zero results).
+# 5. Zero seats connected at startup terminates unscored without inventing a seat (no forfeit/zero results).
 requests, failure, log_text = run_episode(
     with_endpoint=False,
     expect_failure=True,
+    expect_failure_artifact=False,
     seat_slots=(),
     connect_timeout=1,
 )
 assert requests == {"prompt": 0}, requests
-assert failure["status"] == "failed", failure
-assert failure["slot"] == -1 and failure["category"] == "infra_error", failure
-assert "no seats connected" in failure["reason"], failure
+assert failure is None, failure
+assert "no seats connected" in log_text, log_text
 assert "terminated unscored" in log_text, log_text
 
-# 6. Partially connected roster at startup (seat 1 missing) terminates unscored with infra_error diagnostics.
+# 6. Partially connected roster at startup (seat 1 missing) terminates unscored with episode_inconclusive.
 requests, failure, log_text = run_episode(
     with_endpoint=False,
     expect_failure=True,
@@ -238,23 +245,23 @@ requests, failure, log_text = run_episode(
     connect_timeout=1,
 )
 assert requests == {"prompt": 0}, requests
-assert failure["status"] == "failed", failure
-assert failure["slot"] == 1 and failure["seat"] == "Bramble" and failure["role"] == "grazers", failure
-assert failure["category"] == "infra_error", failure
-assert "did not connect" in failure["reason"], failure
+assert failure["failed_policy_index"] == 1, failure
+assert failure["kind"] == "episode_inconclusive", failure
+assert "did not connect" in failure["message"], failure
+assert "seat=Bramble" in log_text and "role=grazers" in log_text, log_text
 assert "terminated unscored" in log_text, log_text
 
-# 7. Mid-game disconnect of a required model seat terminates unscored with infra_error diagnostics.
+# 7. Mid-game disconnect of a required model seat terminates unscored with episode_inconclusive.
 requests, failure, log_text = run_episode(
     lambda _n: valid_payload,
     expect_failure=True,
     kill_slot_after_requests=2,
 )
 assert requests == {"prompt": 2}, requests
-assert failure["status"] == "failed", failure
-assert failure["slot"] == 1 and failure["seat"] == "Bramble" and failure["role"] == "grazers", failure
-assert failure["category"] == "infra_error", failure
-assert "disconnected" in failure["reason"], failure
+assert failure["failed_policy_index"] == 1, failure
+assert failure["kind"] == "episode_inconclusive", failure
+assert "disconnected" in failure["message"], failure
+assert "seat=Bramble" in log_text and "role=grazers" in log_text, log_text
 assert "terminated unscored" in log_text, log_text
 
 print("ecos player smoke: valid bare/fenced replies pass; invalid reply, provider failure, missing credentials, absent roster, partial roster, and mid-game disconnect terminate unscored with diagnostics")
