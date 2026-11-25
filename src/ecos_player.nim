@@ -74,32 +74,42 @@ when isMainModule:
           let started = epochTime()
           let timeoutSeconds = max(1,
             payload["timeout_ms"].getInt() div 1000 - 1)
-          var source = "scripted"
-          var answer: JsonNode
           if kind == "scripted":
             let fields = scriptedDoctrineFromView(view, scriptKind).fields
-            answer = %*{"doctrine": doctrineJson(species, fields),
-              "say": "", "notes": ""}
+            let answer = %*{
+              "type": "action",
+              "generation": generation,
+              "source": "scripted",
+              "doctrine": doctrineJson(species, fields),
+              "say": "",
+              "notes": "",
+              "latency_ms": int((epochTime() - started) * 1000.0)
+            }
+            socket.send($answer)
           elif client.disabled:
-            source = "fallback"
+            echo "ecos player: no LLM credentials configured; forfeiting"
+            socket.send($ %*{
+              "type": "forfeit",
+              "generation": generation,
+              "reason": "no LLM credentials configured"
+            })
           else:
-            source = "llm"
             try:
-              answer =
+              var answer =
                 choosePromptDoctrine(client, view, prompt, timeoutSeconds,
                   promptSelection(payload["prompt_config"]))
+              answer["type"] = %"action"
+              answer["generation"] = %generation
+              answer["source"] = %"llm"
+              answer["latency_ms"] = %int((epochTime() - started) * 1000.0)
+              socket.send($answer)
             except CatchableError as error:
               echo "ecos player: policy call failed: ", error.msg
-              source = "fallback"
-          if source == "fallback":
-            let fields = scriptedDoctrineFromView(view, skSteward).fields
-            answer = %*{"doctrine": doctrineJson(species, fields),
-              "say": "", "notes": ""}
-          answer["type"] = %"action"
-          answer["generation"] = %generation
-          answer["source"] = %source
-          answer["latency_ms"] = %int((epochTime() - started) * 1000.0)
-          socket.send($answer)
+              socket.send($ %*{
+                "type": "forfeit",
+                "generation": generation,
+                "reason": error.msg
+              })
         of "state":
           echo "ecos player: generation ", payload{"generation"}.getInt(),
             " population ", payload{"you"}{"population"}.getInt(),

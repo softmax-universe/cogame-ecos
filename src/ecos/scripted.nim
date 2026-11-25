@@ -1,10 +1,9 @@
 ## Ecos scripted baselines — `steward` and `opportunist`.
 ##
-## Both are fieldable policies (`PLAYER_SCRIPTED=steward|opportunist`) AND
-## the fallback every LLM seat degrades to, which is what keeps offline
-## certification green. Both are legal by construction: every field is
-## clamped to its declared range before it leaves this module, and
-## `tests/test_baseline.nim` asserts it over 12 seeds x 600 ticks.
+## Both are fieldable deterministic policies (`PLAYER_SCRIPTED=steward|opportunist`).
+## Both are legal by construction: every field is clamped to its declared range
+## before it leaves this module, and `tests/test_baseline.nim` asserts it over
+## 12 seeds x 600 ticks.
 
 import std/[json, strutils]
 import sim_types, sim
@@ -16,17 +15,19 @@ type
     skOpportunist = "opportunist"
 
 proc parseScriptKind*(text: string): ScriptKind =
-  ## `PLAYER_SCRIPTED` values. "1"/"true"/"yes" pick the steward, the safe
-  ## default; anything unrecognised registers no baseline at all.
-  case text.strip().toLowerAscii()
-  of "1", "true", "yes", "steward": skSteward
-  of "opportunist", "greedy": skOpportunist
-  else: skNone
+  ## `PLAYER_SCRIPTED` values: empty (prompt policy), `steward`, or `opportunist`.
+  let normalized = text.strip().toLowerAscii()
+  case normalized
+  of "": skNone
+  of "steward": skSteward
+  of "opportunist": skOpportunist
+  else: raise newException(EcosError, "unknown PLAYER_SCRIPTED policy: " & text.strip())
 
 proc baseDoctrine*(kind: ScriptKind, species: Species): Doctrine =
   case kind
+  of skSteward: StewardDoctrine[species]
   of skOpportunist: OpportunistDoctrine[species]
-  else: StewardDoctrine[species]
+  of skNone: raise newException(EcosError, "scripted policy kind must not be none")
 
 proc correct(species: Species, base: Doctrine,
     populations, caps: array[Species, int]):
@@ -69,8 +70,7 @@ proc scriptedDoctrineFromView*(view: JsonNode, kind: ScriptKind):
   for other in Species:
     populations[other] = view["species"][ord(other)]["population"].getInt()
     caps[other] = view["species"][ord(other)]["cap"].getInt()
-  correct(species, baseDoctrine(
-    (if kind == skNone: skSteward else: kind), species), populations, caps)
+  correct(species, baseDoctrine(kind, species), populations, caps)
 
 proc scriptedDoctrineChecked*(sim: SimServer, species: Species,
     kind: ScriptKind): tuple[fields: Doctrine, clamped: bool] =
@@ -78,8 +78,7 @@ proc scriptedDoctrineChecked*(sim: SimServer, species: Species,
   for other in Species:
     populations[other] = sim.population(other)
     caps[other] = sim.capOf(other)
-  correct(species, baseDoctrine(
-    (if kind == skNone: skSteward else: kind), species), populations, caps)
+  correct(species, baseDoctrine(kind, species), populations, caps)
 
 proc scriptedDoctrine*(sim: SimServer, species: Species,
     kind: ScriptKind): Doctrine =

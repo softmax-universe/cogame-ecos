@@ -29,12 +29,12 @@ The JSONL bridge accepts `reset`, `teacher`, and `step`. Reset includes three
 players, a scenario `seed`, `promptVariant`, `promptSeed`, and a split of
 `train`, `validation`, or `test`. Training rejects held-out wordings.
 
-Text actions contain the complete role-specific `doctrine`, spectator `say`,
-and private `notes`. The real player parser rounds numeric inputs, clamps
-ranges, and truncates text at rune boundaries. Accepted actions report the
-normalized result. All three observations and submissions precede installation
-of any doctrine. The original numeric interface keeps its 204 observations and
-four masked action heads of widths 251, 361, 401, and 101.
+Text actions contain the complete role-specific `doctrine`, plus optional
+spectator `say` and private `notes`. The real player parser requires integer
+doctrine fields, clamps ranges, and truncates text at rune boundaries. Accepted
+actions report the normalized result. All three observations and submissions
+precede installation of any doctrine. The original numeric interface keeps its
+204 observations and four masked action heads of widths 251, 361, 401, and 101.
 
 ## Teacher exports and validation
 

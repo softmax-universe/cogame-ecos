@@ -160,6 +160,6 @@ proc doctrineJson*(species: Species, doctrine: Doctrine): JsonNode =
 proc speciesFromName*(name: string): Species =
   case name.strip().toLowerAscii()
   of "grass": spGrass
-  of "grazers", "grazer": spGrazers
-  of "predators", "predator": spPredators
+  of "grazers": spGrazers
+  of "predators": spPredators
   else: raise newException(EcosError, "unknown species: " & name)

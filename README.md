@@ -57,7 +57,8 @@ coworld upload-policy coworld-ecos:latest --name my-ecos-baseline \
 ```
 
 Players need their own inference credential or hosted sidecar for prompt calls.
-With no credential or a failed call, the player sends a steward fallback action. Missing or invalid actions also fall back in the game.
+Missing credentials, failed calls, invalid replies, timeouts, or disconnects
+forfeit the episode rather than substituting a fallback move.
 
 Seats see only the aliases `Sedge`, `Bramble` and `Quill` and their role names.
 Policy names exist spectator-side only — in the replay, the scorebug and
@@ -73,7 +74,7 @@ Policy names exist spectator-side only — in the replay, the scorebug and
 | `src/ecos/sim.nim` | the ten numbered tick rules, the generation clock, scoring |
 | `src/ecos/events.nim` | the replay's event vocabulary |
 | `src/ecos/scripted.nim` | the `steward` and `opportunist` baselines |
-| `src/ecos/decision.nim` | doctrine parsing and fallback decisions |
+| `src/ecos/decision.nim` | strict doctrine parsing and validation |
 | `src/ecos/llm.nim` | player-side prompt transport and parsing |
 | `src/ecos/replays.nim` | the `ecos.replay.v1` writer, reader and playhead |
 | `src/ecos/global.nim` | the sprite-protocol board renderer |

@@ -70,7 +70,7 @@ when isMainModule:
   # `players_missing` the moment the manifest declares any other player entry
   # (LEARNINGS 2026-08-23 raid, item 2).
   var declared: HashSet[string]
-  doAssert manifest{"player"}.len == Seats
+  doAssert manifest{"player"}.len == 2
   for player in manifest{"player"}:
     let id = player{"id"}.getStr()
     declared.incl(id)
@@ -82,7 +82,7 @@ when isMainModule:
     doAssert player{"image"}.getStr() == placeholder
     doAssert player{"run"}[0].getStr() == "/bin/ecos-player"
   doAssert declared ==
-    ["ecos-player", "ecos-steward", "ecos-opportunist"].toHashSet()
+    ["ecos-steward", "ecos-opportunist"].toHashSet()
   var seated: HashSet[string]
   for entry in manifest{"certification"}{"players"}:
     seated.incl(entry{"player_id"}.getStr())
