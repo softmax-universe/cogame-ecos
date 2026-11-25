@@ -588,17 +588,10 @@ proc endEarly*(sim: SimServer) =
   sim.finish("deadline", "deadline")
 
 proc forfeit*(sim: SimServer) =
-  ## Episode forfeited before all seats could play. All zero, but results and
-  ## the replay are still written.
+  ## No seat connected. All zero, but results and the replay are still
+  ## written.
   for species in Species:
     sim.scores[species] = 0.0
-  sim.finish("forfeit", "forfeit")
-
-proc forfeitSeat*(sim: SimServer, slot: int) =
-  ## One seat forfeited (rejected action, failure, timeout, or disconnect).
-  ## Zeroes that seat's score and ends the episode with full post-game evidence.
-  if slot >= 0 and slot < sim.roleOf.len:
-    sim.scores[sim.roleOf[slot]] = 0.0
   sim.finish("forfeit", "forfeit")
 
 proc atGenerationBoundary*(sim: SimServer): bool =

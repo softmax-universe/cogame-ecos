@@ -99,7 +99,24 @@ when isMainModule:
 
   let refusal = Response(code: 200, body: $ %*{
     "content": [], "stop_reason": "refusal"})
-  assertRejected(proc() = discard client.textOf(refusal, "", "http://stub"))
+  block:
+    var sawInvalid = false
+    try:
+      discard client.textOf(refusal, "", "http://stub")
+    except EcosInvalidActionError:
+      sawInvalid = true
+    doAssert sawInvalid
+
+  let serverErr = Response(code: 500, body: "upstream error")
+  block:
+    var sawInfra = false
+    try:
+      discard client.textOf(serverErr, "", "http://stub")
+    except EcosInvalidActionError:
+      doAssert false, "HTTP 500 must be an infra error, not invalid action"
+    except EcosError:
+      sawInfra = true
+    doAssert sawInfra
 
   let view = world.observationJson(world.seatOf[spPredators])
   doAssert view["rules"]["killCap"].getInt() == KillCap

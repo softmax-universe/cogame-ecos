@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Run native Ecos episodes with stub player-side model endpoints, including strict rejection/forfeit."""
+"""Run native Ecos host+player round-trip episodes covering valid bare/fenced JSON,
+invalid/ambiguous replies, provider failures, and missing credentials."""
 
 import json
 import os
@@ -21,7 +22,7 @@ def free_port():
         return sock.getsockname()[1]
 
 
-def run_episode(reply_fn=None, with_endpoint=True):
+def run_episode(reply_fn=None, with_endpoint=True, expect_failure=False):
     requests = {"prompt": 0}
     model = None
     if with_endpoint:
@@ -37,14 +38,23 @@ def run_episode(reply_fn=None, with_endpoint=True):
                 )
                 requests["prompt"] += 1
                 assert self.headers["x-coworld-player-slot"] == "1"
-                text = reply_fn(requests["prompt"])
-                reply = {"content": [{"type": "text", "text": text}], "stop_reason": "end_turn"}
-                encoded = json.dumps(reply).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(encoded)))
-                self.end_headers()
-                self.wfile.write(encoded)
+                outcome = reply_fn(requests["prompt"])
+                if isinstance(outcome, tuple):
+                    status, payload = outcome
+                    encoded = payload.encode()
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(encoded)))
+                    self.end_headers()
+                    self.wfile.write(encoded)
+                else:
+                    reply = {"content": [{"type": "text", "text": outcome}], "stop_reason": "end_turn"}
+                    encoded = json.dumps(reply).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(encoded)))
+                    self.end_headers()
+                    self.wfile.write(encoded)
 
             def log_message(self, *_args):
                 pass
@@ -67,7 +77,9 @@ def run_episode(reply_fn=None, with_endpoint=True):
         game_env.update({"COGAME_HOST": "127.0.0.1", "COGAME_PORT": str(port),
                          "COGAME_CONFIG_URI": (root / "config.json").as_uri(),
                          "COGAME_RESULTS_URI": (root / "results.json").as_uri(),
-                         "COGAME_SAVE_REPLAY_URI": (root / "replay.json").as_uri()})
+                         "COGAME_SAVE_REPLAY_URI": (root / "replay.json").as_uri(),
+                         "COGAME_PLAYER_FAILURE_URI": (root / "player_failure.json").as_uri(),
+                         "COGAME_LOG_URI": (root / "episode.log").as_uri()})
         game = subprocess.Popen([GAME], env=game_env, stdout=(root / "game.log").open("w"),
                                 stderr=subprocess.STDOUT)
         players = []
@@ -100,12 +112,30 @@ def run_episode(reply_fn=None, with_endpoint=True):
                 players.append(subprocess.Popen([PLAYER], env=env,
                                stdout=(root / f"player-{slot}.log").open("w"),
                                stderr=subprocess.STDOUT))
-            assert game.wait(timeout=35) == 0, (root / "game.log").read_text()
-            for slot, player in enumerate(players):
-                assert player.wait(timeout=5) == 0, (root / f"player-{slot}.log").read_text()
-            results = json.loads((root / "results.json").read_text())
-            replay = json.loads((root / "replay.json").read_text())
-            return requests, results, replay
+            game_rc = game.wait(timeout=35)
+            player_rcs = [player.wait(timeout=5) for player in players]
+            results_path = root / "results.json"
+            replay_path = root / "replay.json"
+            failure_path = root / "player_failure.json"
+            log_text = (root / "episode.log").read_text() if (root / "episode.log").exists() else ""
+            if expect_failure:
+                assert game_rc != 0, f"expected failed episode exit != 0, got 0:\n{(root / 'game.log').read_text()}"
+                assert player_rcs[1] != 0, f"expected failing player exit != 0, got {player_rcs}"
+                assert player_rcs[0] == 0 and player_rcs[2] == 0, f"innocent seats should exit 0, got {player_rcs}"
+                assert not results_path.exists(), f"failed episode must not write numeric results: {results_path.read_text()}"
+                assert not replay_path.exists(), "failed episode must not write scored replay"
+                assert failure_path.exists(), f"missing player_failure.json:\n{(root / 'game.log').read_text()}"
+                failure = json.loads(failure_path.read_text())
+                assert "scores" not in failure and "win" not in failure, failure
+                return requests, failure, log_text
+            else:
+                assert game_rc == 0, (root / "game.log").read_text()
+                for slot, rc in enumerate(player_rcs):
+                    assert rc == 0, (root / f"player-{slot}.log").read_text()
+                assert not failure_path.exists(), failure_path.read_text()
+                results = json.loads(results_path.read_text())
+                replay = json.loads(replay_path.read_text())
+                return requests, results, replay
         finally:
             for process in [*players, game]:
                 if process.poll() is None:
@@ -132,23 +162,37 @@ assert sources.count("llm") == 2, sources
 assert sources.count("scripted") == 4, sources
 assert sources.count("fallback") == 0, sources
 assert results["reason"] == "complete", results
+assert len(results["scores"]) == 3 and all(isinstance(s, (int, float)) for s in results["scores"]), results
 
-# 2. Ambiguous prose around JSON is rejected and forfeits instead of falling back.
-requests, results, replay = run_episode(
-    lambda _n: f"Here is my doctrine:\n{valid_payload}"
+# 2. Ambiguous prose around JSON is rejected and terminates unscored with invalid_action diagnostics.
+requests, failure, log_text = run_episode(
+    lambda _n: f"Here is my doctrine:\n{valid_payload}",
+    expect_failure=True,
 )
 assert requests == {"prompt": 1}, requests
-doctrines = [event for event in replay["events"] if event["k"] == "doctrine"]
-assert len(doctrines) == 0, doctrines
-assert results["reason"] == "forfeit" and results["ending"] == "forfeit", results
-assert results["scores"][1] == 0.0, results
+assert failure["status"] == "failed", failure
+assert failure["slot"] == 1 and failure["seat"] == "Bramble" and failure["role"] == "grazers", failure
+assert failure["category"] == "invalid_action", failure
+assert "invalid JSON object" in failure["reason"], failure
+assert "terminated unscored" in log_text, log_text
 
-# 3. Missing credentials on a prompt player forfeits cleanly with zero fallback.
-requests, results, replay = run_episode(with_endpoint=False)
+# 3. Provider HTTP failure (500) terminates unscored with infra_error diagnostics and no numeric results.
+requests, failure, log_text = run_episode(
+    lambda _n: (500, '{"error":{"message":"upstream unavailable"}}'),
+    expect_failure=True,
+)
+assert requests == {"prompt": 1}, requests
+assert failure["status"] == "failed", failure
+assert failure["slot"] == 1 and failure["category"] == "infra_error", failure
+assert "500" in failure["reason"], failure
+assert "terminated unscored" in log_text, log_text
+
+# 4. Missing credentials on a prompt player terminates unscored with infra_error diagnostics and no numeric results.
+requests, failure, log_text = run_episode(with_endpoint=False, expect_failure=True)
 assert requests == {"prompt": 0}, requests
-doctrines = [event for event in replay["events"] if event["k"] == "doctrine"]
-assert len(doctrines) == 0, doctrines
-assert results["reason"] == "forfeit" and results["ending"] == "forfeit", results
-assert results["scores"][1] == 0.0, results
+assert failure["status"] == "failed", failure
+assert failure["slot"] == 1 and failure["category"] == "infra_error", failure
+assert failure["reason"] == "no LLM credentials configured", failure
+assert "terminated unscored" in log_text, log_text
 
-print("ecos player smoke: valid bare/fenced replies pass; invalid reply and missing credentials forfeit with zero fallback")
+print("ecos player smoke: valid bare/fenced replies pass; invalid reply, provider failure, and missing credentials terminate unscored with diagnostics")

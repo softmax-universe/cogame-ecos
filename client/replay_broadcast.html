@@ -3908,7 +3908,7 @@ body[data-noviewpanel] #viewpanel { display: none !important; }
         'generations it had played; ' + winName + ' led on integrated ' +
         'biomass (' + winScore + ').';
     } else if (ending === 'forfeit') {
-      how.textContent = 'Episode ended by forfeit.';
+      how.textContent = 'No seat connected, so nothing was played.';
     } else {
       how.textContent = (s.gens || 10) + ' generations in balance. ' +
         winName + ' integrated the most biomass (' + winScore + ').';

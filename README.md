@@ -58,7 +58,8 @@ coworld upload-policy coworld-ecos:latest --name my-ecos-baseline \
 
 Players need their own inference credential or hosted sidecar for prompt calls.
 Missing credentials, failed calls, invalid replies, timeouts, or disconnects
-forfeit the episode rather than substituting a fallback move.
+terminate the unfinished episode unscored with failure diagnostics rather than
+substituting a fallback move or inventing a forfeit score.
 
 Seats see only the aliases `Sedge`, `Bramble` and `Quill` and their role names.
 Policy names exist spectator-side only — in the replay, the scorebug and

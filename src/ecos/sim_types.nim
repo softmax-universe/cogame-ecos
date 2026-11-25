@@ -14,6 +14,8 @@ import std/[json, strutils]
 
 type
   EcosError* = object of CatchableError
+  EcosInvalidActionError* = object of EcosError
+    ## Model-generated invalid, unparseable, or illegal action payload.
 
   Species* = enum
     spGrass = "grass"

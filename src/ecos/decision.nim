@@ -30,9 +30,10 @@ proc cleanNotes*(text: string): string =
 proc intField(node: JsonNode, name: string): int =
   ## A doctrine value must be a JSON integer.
   if node.isNil or node.kind == JNull:
-    raise newException(EcosError, "doctrine field missing: " & name)
+    raise newException(EcosInvalidActionError, "doctrine field missing: " & name)
   if node.kind != JInt:
-    raise newException(EcosError, "doctrine field must be an integer: " & name)
+    raise newException(EcosInvalidActionError,
+      "doctrine field must be an integer: " & name)
   node.getInt()
 
 proc optionalStringField(payload: JsonNode, name: string): string =
@@ -40,7 +41,7 @@ proc optionalStringField(payload: JsonNode, name: string): string =
     return ""
   let node = payload[name]
   if node.kind != JString:
-    raise newException(EcosError, name & " must be a string")
+    raise newException(EcosInvalidActionError, name & " must be a string")
   node.getStr()
 
 proc parseDecision*(species: Species, payload: JsonNode,
@@ -49,20 +50,22 @@ proc parseDecision*(species: Species, payload: JsonNode,
   ## exactly the four integer fields for `species`, plus optional string `say`
   ## and `notes`. Out-of-range integers are clamped and recorded as such.
   if payload.isNil or payload.kind != JObject:
-    raise newException(EcosError, "decision payload must be a JSON object")
+    raise newException(EcosInvalidActionError,
+      "decision payload must be a JSON object")
   for key, _ in payload.pairs:
     if key in ["doctrine", "say", "notes"]:
       continue
     if allowWireFields and key in ["type", "generation", "source", "latency_ms"]:
       continue
-    raise newException(EcosError, "unexpected decision field: " & key)
+    raise newException(EcosInvalidActionError, "unexpected decision field: " & key)
   result.say = cleanSay(optionalStringField(payload, "say"))
   result.notes = cleanNotes(optionalStringField(payload, "notes"))
   if not payload.hasKey("doctrine") or payload["doctrine"].kind != JObject:
-    raise newException(EcosError, "decision must contain a doctrine object")
+    raise newException(EcosInvalidActionError,
+      "decision must contain a doctrine object")
   let source = payload["doctrine"]
   if source.len != 4:
-    raise newException(EcosError,
+    raise newException(EcosInvalidActionError,
       "doctrine must contain exactly 4 fields for " & RoleNames[species])
   var raw: Doctrine
   for i in 0 .. 3:

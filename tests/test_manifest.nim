@@ -65,12 +65,15 @@ when isMainModule:
   doAssert fixture{"players"}.len == Seats
   doAssert manifest{"certification"}{"players"}.len == Seats
 
-  # ---- every declared player is seated exactly once ------------------------
-  # `players-run` seats the WHOLE roster: a baseline x N fixture fails
-  # `players_missing` the moment the manifest declares any other player entry
-  # (LEARNINGS 2026-08-23 raid, item 2).
+  # ---- declared players: native prompt player first, scripted baselines separate
+  # Offline certification seats only deterministic scripted player IDs so it
+  # never relies on model credentials or fallback moves.
   var declared: HashSet[string]
-  doAssert manifest{"player"}.len == 2
+  doAssert manifest{"player"}.len == 3
+  doAssert manifest{"player"}[0]{"id"}.getStr() == "ecos-player",
+    "native model player must be listed first"
+  doAssert not manifest{"player"}[0].hasKey("env"),
+    "native model player must not set scripted env"
   for player in manifest{"player"}:
     let id = player{"id"}.getStr()
     declared.incl(id)
@@ -82,13 +85,14 @@ when isMainModule:
     doAssert player{"image"}.getStr() == placeholder
     doAssert player{"run"}[0].getStr() == "/bin/ecos-player"
   doAssert declared ==
-    ["ecos-steward", "ecos-opportunist"].toHashSet()
+    ["ecos-player", "ecos-steward", "ecos-opportunist"].toHashSet()
   var seated: HashSet[string]
   for entry in manifest{"certification"}{"players"}:
-    seated.incl(entry{"player_id"}.getStr())
-  doAssert seated == declared,
-    "every declared player id must occupy a certification slot; declared " &
-    $declared & " seated " & $seated
+    let pid = entry{"player_id"}.getStr()
+    doAssert pid in declared, "certification player " & pid & " is undeclared"
+    seated.incl(pid)
+  doAssert seated == ["ecos-steward", "ecos-opportunist"].toHashSet(),
+    "offline certification must seat the scripted baselines; seated " & $seated
 
   # ---- the static replay bundle, never a pod -------------------------------
   doAssert manifest{"game"}{"replay_viewer"}{"bundle"}.getStr() ==

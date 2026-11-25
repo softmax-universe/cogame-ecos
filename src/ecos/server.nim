@@ -36,7 +36,9 @@ type
     decisions: seq[Decision]
     actionReceived: seq[bool]
     failedSlot: int
+    failureCategory: string
     failureReason: string
+    failureRaw: string
     playerSockets: Table[int, WebSocket]
     socketSlots: Table[WebSocket, int]
     globalSockets: HashSet[WebSocket]
@@ -225,6 +227,68 @@ proc finishEpisode(runtimeConfig: RuntimeConfig) =
   logLine("ecos: episode complete, shutting down")
   quit(0)
 
+proc failEpisode(runtimeConfig: RuntimeConfig, slot: int,
+    category, reason: string, raw = "") =
+  ## Terminate an unfinished episode unscored with failure diagnostics and no
+  ## gameplay results or invented winner.
+  var failureJson: JsonNode
+  withLock stateLock:
+    if state.finished:
+      return
+    state.finished = true
+    let generation = state.sim.generation
+    let seatName =
+      if slot >= 0 and slot < state.sim.names.len: state.sim.names[slot]
+      else: ""
+    let roleName =
+      if slot >= 0 and slot < state.sim.roleOf.len:
+        RoleNames[state.sim.roleOf[slot]]
+      else: ""
+    failureJson = %*{
+      "status": "failed",
+      "slot": slot,
+      "seat": seatName,
+      "role": roleName,
+      "generation": generation,
+      "category": category,
+      "reason": reason
+    }
+    if raw.len > 0:
+      failureJson["raw"] = %raw
+    logLine("ecos: episode failed (category=" & category & ", slot=" & $slot &
+      ", gen=" & $generation & "): " & reason)
+    var notice = %*{
+      "type": "failed",
+      "done": true,
+      "failed_slot": slot,
+      "generation": generation,
+      "category": category,
+      "reason": reason
+    }
+    for playerSlot, socket in state.playerSockets:
+      notice["slot"] = %playerSlot
+      try:
+        socket.send($notice)
+      except CatchableError:
+        discard
+
+  sleep(200)
+  let failureUri = getEnv("COGAME_PLAYER_FAILURE_URI").strip()
+  if failureUri.len > 0:
+    try:
+      writeArtifact(failureUri, $failureJson, "application/json",
+        "COGAME_PLAYER_FAILURE_METHOD")
+    except CatchableError as error:
+      logLine("ecos: player failure artifact failed: " & error.msg)
+  logLine("ecos: unfinished episode terminated unscored without results")
+  if runtimeConfig.logUri.len > 0:
+    try:
+      writeArtifact(runtimeConfig.logUri, gameLogText(), "text/plain",
+        "COGAME_LOG_METHOD")
+    except CatchableError as error:
+      logLine("ecos: log artifact failed: " & error.msg)
+  quit(1)
+
 # ---- the generation loop -----------------------------------------------------
 
 proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
@@ -242,21 +306,33 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
         break
       sleep(200)
 
+    var anyConnected = false
     var allConnected = false
+    var missingSlot = -1
     withLock stateLock:
       state.started = true
+      anyConnected = state.playerSockets.len > 0
       allConnected = state.playerSockets.len >= config.tokens.len
+      for slot in 0 ..< config.tokens.len:
+        if not state.playerSockets.hasKey(slot):
+          missingSlot = slot
+          break
       logLine("ecos: starting with " & $state.playerSockets.len & "/" &
         $config.tokens.len & " seats connected")
       state.broadcastLocked(0)
 
-    if not allConnected and config.tokens.len > 0:
-      logLine("ecos: only " & $state.playerSockets.len & "/" &
-        $config.tokens.len & " seats connected within " &
+    if not anyConnected and config.tokens.len > 0:
+      logLine("ecos: no seat connected within " &
         $config.playerConnectTimeoutSeconds & "s; forfeiting")
       withLock stateLock:
         state.sim.forfeit()
       finishEpisode(runtimeConfig)
+      return
+
+    if not allConnected and config.tokens.len > 0:
+      failEpisode(runtimeConfig, missingSlot, "infra_error",
+        "seat " & $missingSlot & " did not connect within " &
+        $config.playerConnectTimeoutSeconds & "s")
       return
 
     ## The platform kills an episode that outruns its timeout and keeps
@@ -325,16 +401,17 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
           break
         sleep(20)
 
-      var forfeited = false
+      var failedSlot = -1
+      var failureCategory = ""
+      var failureReason = ""
+      var failureRaw = ""
       var fromTick = 0
       withLock stateLock:
         if state.failedSlot >= 0:
-          logLine("ecos: gen " & $state.sim.generation & " seat " &
-            $state.failedSlot & " (" & state.sim.names[state.failedSlot] &
-            ") forfeited: " & state.failureReason)
-          state.sim.forfeitSeat(state.failedSlot)
-          state.broadcastLocked(state.sim.tick)
-          forfeited = true
+          failedSlot = state.failedSlot
+          failureCategory = state.failureCategory
+          failureReason = state.failureReason
+          failureRaw = state.failureRaw
         else:
           var timedOutSlot = -1
           for slot in seats:
@@ -342,14 +419,11 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
               timedOutSlot = slot
               break
           if timedOutSlot >= 0:
-            logLine("ecos: gen " & $state.sim.generation & " seat " &
-              $timedOutSlot & " (" & state.sim.names[timedOutSlot] &
-              ") timed out after " & $config.actionTimeoutSeconds &
-              "s; forfeiting")
-            state.sim.forfeitSeat(timedOutSlot)
-            state.broadcastLocked(state.sim.tick)
-            forfeited = true
-        if not forfeited:
+            failedSlot = timedOutSlot
+            failureCategory = "infra_error"
+            failureReason = "action timed out after " &
+              $config.actionTimeoutSeconds & "s"
+        if failedSlot < 0:
           fromTick = state.sim.tick
           for slot in seats:
             let decision = state.decisions[slot]
@@ -363,8 +437,10 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
           state.sim.runGeneration()
           logLine("ecos: " & state.sim.summaryLine())
           state.broadcastLocked(fromTick)
-      if forfeited:
-        break
+      if failedSlot >= 0:
+        failEpisode(runtimeConfig, failedSlot, failureCategory, failureReason,
+          failureRaw)
+        return
 
       ## Floor the spacing between generation starts for sidecar rate limits.
       let elapsed = epochTime() - batchStart
@@ -504,26 +580,37 @@ proc websocketHandler(websocket: WebSocket, event: WebSocketEvent,
                 not state.actionReceived[slot]:
               state.decisions[slot] = decision
               state.actionReceived[slot] = true
-        of "forfeit":
+        of "error":
+          let category =
+            if payload.hasKey("category") and payload["category"].kind == JString and
+                payload["category"].getStr() in ["infra_error", "invalid_action"]:
+              payload["category"].getStr()
+            else:
+              "infra_error"
           let reason =
             if payload.hasKey("reason") and payload["reason"].kind == JString:
               payload["reason"].getStr()
             else:
-              "player forfeited"
-          logLine("ecos: seat " & $slot & " reported forfeit: " & reason)
+              "player reported failure"
+          logLine("ecos: seat " & $slot & " reported " & category & ": " & reason)
           withLock stateLock:
             if state.started and not state.finished and state.failedSlot < 0:
               state.failedSlot = slot
+              state.failureCategory = category
               state.failureReason = reason
         else:
-          raise newException(EcosError,
+          raise newException(EcosInvalidActionError,
             "unexpected player frame type: " & payload{"type"}.getStr("?"))
       except CatchableError as error:
         logLine("ecos: rejecting player frame from seat " & $slot & ": " & error.msg)
         withLock stateLock:
           if state.started and not state.finished and state.failedSlot < 0:
             state.failedSlot = slot
+            state.failureCategory = "invalid_action"
             state.failureReason = error.msg
+            state.failureRaw =
+              if message.data.len > 500: message.data[0 ..< 500]
+              else: message.data
     of ErrorEvent:
       discard
     of CloseEvent:
@@ -534,8 +621,9 @@ proc websocketHandler(websocket: WebSocket, event: WebSocketEvent,
           if state.playerSockets.getOrDefault(slot) == websocket:
             state.playerSockets.del(slot)
             if state.started and not state.finished and state.failedSlot < 0:
-              logLine("ecos: seat " & $slot & " disconnected; forfeiting")
+              logLine("ecos: seat " & $slot & " disconnected; failing episode")
               state.failedSlot = slot
+              state.failureCategory = "infra_error"
               state.failureReason = "player disconnected"
         state.globalSockets.excl(websocket)
         state.viewers.del(websocket)
@@ -570,7 +658,9 @@ proc runGameServer*(config: GameConfig, runtimeConfig: RuntimeConfig) =
   state.decisions = newSeq[Decision](config.players.len)
   state.actionReceived = newSeq[bool](config.players.len)
   state.failedSlot = -1
+  state.failureCategory = ""
   state.failureReason = ""
+  state.failureRaw = ""
 
   gameServer = newServer(buildRouter(), websocketHandler)
   createThread(gameThread, runGame, runtimeConfig)

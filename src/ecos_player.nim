@@ -49,6 +49,7 @@ when isMainModule:
   ## quit(0) can outrun the flushed final frame. Exiting non-zero there makes
   ## docker_smoke pass and certification fail intermittently (LEARNINGS
   ## 2026-08-23 raid, item 3), so a dead socket is a clean exit 0.
+  var failed = false
   try:
     while true:
       let received = socket.receiveMessage()
@@ -87,12 +88,16 @@ when isMainModule:
             }
             socket.send($answer)
           elif client.disabled:
-            echo "ecos player: no LLM credentials configured; forfeiting"
+            echo "ecos player: no LLM credentials configured; failing"
             socket.send($ %*{
-              "type": "forfeit",
+              "type": "error",
               "generation": generation,
+              "category": "infra_error",
               "reason": "no LLM credentials configured"
             })
+            sleep(50)
+            failed = true
+            break
           else:
             try:
               var answer =
@@ -103,13 +108,28 @@ when isMainModule:
               answer["source"] = %"llm"
               answer["latency_ms"] = %int((epochTime() - started) * 1000.0)
               socket.send($answer)
+            except EcosInvalidActionError as error:
+              echo "ecos player: invalid model reply: ", error.msg
+              socket.send($ %*{
+                "type": "error",
+                "generation": generation,
+                "category": "invalid_action",
+                "reason": error.msg
+              })
+              sleep(50)
+              failed = true
+              break
             except CatchableError as error:
               echo "ecos player: policy call failed: ", error.msg
               socket.send($ %*{
-                "type": "forfeit",
+                "type": "error",
                 "generation": generation,
+                "category": "infra_error",
                 "reason": error.msg
               })
+              sleep(50)
+              failed = true
+              break
         of "state":
           echo "ecos player: generation ", payload{"generation"}.getInt(),
             " population ", payload{"you"}{"population"}.getInt(),
@@ -117,6 +137,10 @@ when isMainModule:
         of "final":
           echo "ecos player: final scores ", payload{"scores"},
             " (", payload{"ending"}.getStr(), ")"
+          break
+        of "failed":
+          echo "ecos player: episode failed (", payload{"category"}.getStr(),
+            "): ", payload{"reason"}.getStr()
           break
         else:
           discard
@@ -128,4 +152,4 @@ when isMainModule:
     socket.close()
   except CatchableError:
     discard
-  quit(0)
+  quit(if failed: 1 else: 0)
