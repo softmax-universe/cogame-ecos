@@ -339,7 +339,7 @@
       "id": "ecos-player",
       "name": "Ecos Prompt Player",
       "type": "player",
-      "description": "Prompt player: chooses a complete doctrine from each private decision using PLAYER_PROMPT guidance and a player-owned model credential.",
+      "description": "Native prompt player: chooses a complete doctrine from each private decision using Coworld native LLM inference and optional PLAYER_PROMPT guidance.",
       "image": "{{ECOS_IMAGE}}",
       "run": [
         "/bin/ecos-player"
@@ -353,7 +353,11 @@
           "cpu": "1"
         }
       },
-      "source_url": "https://github.com/softmax-universe/cogame-ecos/tree/main"
+      "source_url": "https://github.com/softmax-universe/cogame-ecos/tree/main",
+      "env": {
+        "COWORLD_LLM_ENABLED": "true",
+        "COWORLD_LLM_MODEL": "anthropic/claude-haiku-4.5"
+      }
     },
     {
       "id": "ecos-steward",
@@ -483,17 +487,18 @@
       "generations": 6,
       "ticksPerGeneration": 60,
       "minTurnSeconds": 0,
+      "actionTimeoutSeconds": 30,
       "playerConnectTimeoutSeconds": 180
     },
     "players": [
       {
+        "player_id": "ecos-player"
+      },
+      {
+        "player_id": "ecos-steward"
+      },
+      {
         "player_id": "ecos-opportunist"
-      },
-      {
-        "player_id": "ecos-steward"
-      },
-      {
-        "player_id": "ecos-steward"
       }
     ]
   }

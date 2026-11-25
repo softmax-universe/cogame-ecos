@@ -56,10 +56,15 @@ coworld upload-policy coworld-ecos:latest --name my-ecos-baseline \
   --run /bin/ecos-player --secret-env PLAYER_SCRIPTED=steward
 ```
 
-Players need their own inference credential or hosted sidecar for prompt calls.
-Missing credentials, failed calls, invalid replies, timeouts, or disconnects
-terminate the unfinished episode unscored with failure diagnostics rather than
-substituting a fallback move or inventing a forfeit score.
+Players need their own inference credential or the Coworld native LLM sidecar
+(`COWORLD_LLM_ENABLED=true`, default `COWORLD_LLM_MODEL=anthropic/claude-haiku-4.5`
+on `ecos-player`) for prompt calls. Release certification seats `ecos-player`
+alongside `ecos-steward` and `ecos-opportunist`; offline Docker smoke
+(`tools/ci/docker_smoke.sh`) separately nominates scripted seats via
+`SMOKE_PLAYERS`. Missing credentials, failed calls, invalid replies, timeouts,
+or disconnects terminate the unfinished episode unscored with failure
+diagnostics rather than substituting a fallback move or inventing a forfeit
+score.
 
 Seats see only the aliases `Sedge`, `Bramble` and `Quill` and their role names.
 Policy names exist spectator-side only — in the replay, the scorebug and

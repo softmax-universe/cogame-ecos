@@ -7,9 +7,15 @@
 #   tools/ci/docker_smoke.sh [image]
 #
 # Starts ONE game container plus one player container per seat on a shared
-# user-defined docker network, driving them with the certification fixture out
-# of coworld_manifest_template.json (same seat mix the certifier will use), and
-# asserts the game exits 0 having written results.json and a replay.
+# user-defined docker network, driving them with the game_config out of
+# coworld_manifest_template.json and an explicit offline scripted seat mix
+# (default: ecos-opportunist,ecos-steward,ecos-steward), and asserts the game
+# exits 0 having written results.json and a replay.
+#
+# Release certification in coworld_manifest_template.json seats the real native
+# model player (`ecos-player`) alongside the scripted baselines; this raw-Docker
+# smoke runs offline without LLM credentials, so it nominates scripted seats
+# separately via SMOKE_PLAYERS.
 #
 # It is the containerised twin of the local tmp/run_e2e.sh: same COGAME_*
 # contract, same one-player-process-per-slot shape, but every process runs in
@@ -30,6 +36,9 @@
 #   SMOKE_TIMEOUT              seconds to wait for the episode  (900)
 #   SMOKE_REQUIRE_REPLAY_JSON  1 = replay must parse as JSON    (1)
 #                              set 0 for binary replay formats
+#   SMOKE_PLAYERS              comma-separated declared player IDs for offline
+#                              scripted smoke
+#                              (ecos-opportunist,ecos-steward,ecos-steward)
 #   SMOKE_EXTRA_ENV            extra "K=V K=V" for every player (empty)
 #   SMOKE_REPLAY_OUT           where to COPY the replay this smoke produced,
 #                              so it outlives the scratch dir the trap deletes
@@ -158,10 +167,24 @@ with open(os.path.join(work, "config.json"), "w") as fh:
 
 by_id = {p.get("id"): p for p in (manifest.get("player") or [])}
 extra_env = [kv for kv in (os.environ.get("SMOKE_EXTRA_ENV") or "").split() if "=" in kv]
+smoke_players_raw = os.environ.get(
+    "SMOKE_PLAYERS", "ecos-opportunist,ecos-steward,ecos-steward"
+).strip()
+smoke_players = [p.strip() for p in smoke_players_raw.split(",") if p.strip()]
+if len(smoke_players) != seats:
+    raise SystemExit(
+        f"SEAT-COUNT FAIL: SMOKE_PLAYERS names {len(smoke_players)} seats "
+        f"({smoke_players}), expected {seats}."
+    )
+for pid in smoke_players:
+    if pid not in by_id:
+        raise SystemExit(
+            f"SMOKE_PLAYERS FAIL: player_id {pid!r} is not declared in {manifest_path}"
+        )
 
 for slot in range(seats):
-    player_id = cert_players[slot].get("player_id") if slot < len(cert_players) else None
-    entry = by_id.get(player_id) or {}
+    player_id = smoke_players[slot]
+    entry = by_id[player_id]
     env_args = []
     for key, value in (entry.get("env") or {}).items():
         env_args += ["-e", f"{key}={value}"]
@@ -172,7 +195,7 @@ for slot in range(seats):
         fh.write(" ".join(shlex.quote(a) for a in env_args))
     with open(os.path.join(work, f"cmd-{slot}.args"), "w") as fh:
         fh.write(" ".join(shlex.quote(a) for a in argv))
-    print(f"slot {slot}: player_id={player_id or '(default)'} run={argv} env={len(env_args) // 2}")
+    print(f"slot {slot}: player_id={player_id} run={argv} env={len(env_args) // 2}")
 
 with open(os.path.join(work, "seats"), "w") as fh:
     fh.write(str(seats))

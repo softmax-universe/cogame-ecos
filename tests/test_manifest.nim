@@ -66,14 +66,22 @@ when isMainModule:
   doAssert manifest{"certification"}{"players"}.len == Seats
 
   # ---- declared players: native prompt player first, scripted baselines separate
-  # Offline certification seats only deterministic scripted player IDs so it
-  # never relies on model credentials or fallback moves.
+  # Release certification seats the native model player at seat 0 alongside
+  # every declared scripted baseline so every declared player ID is certified.
   var declared: HashSet[string]
   doAssert manifest{"player"}.len == 3
-  doAssert manifest{"player"}[0]{"id"}.getStr() == "ecos-player",
+  let nativePlayer = manifest{"player"}[0]
+  doAssert nativePlayer{"id"}.getStr() == "ecos-player",
     "native model player must be listed first"
-  doAssert not manifest{"player"}[0].hasKey("env"),
-    "native model player must not set scripted env"
+  doAssert nativePlayer.hasKey("env"),
+    "native model player must declare native Coworld LLM env"
+  doAssert nativePlayer{"env"}{"COWORLD_LLM_ENABLED"}.getStr() == "true",
+    "native model player must set COWORLD_LLM_ENABLED=true"
+  doAssert nativePlayer{"env"}{"COWORLD_LLM_MODEL"}.getStr() ==
+    "anthropic/claude-haiku-4.5",
+    "native model player must set default COWORLD_LLM_MODEL"
+  doAssert not nativePlayer{"env"}.hasKey("PLAYER_SCRIPTED"),
+    "native model player must not set PLAYER_SCRIPTED"
   for player in manifest{"player"}:
     let id = player{"id"}.getStr()
     declared.incl(id)
@@ -86,13 +94,17 @@ when isMainModule:
     doAssert player{"run"}[0].getStr() == "/bin/ecos-player"
   doAssert declared ==
     ["ecos-player", "ecos-steward", "ecos-opportunist"].toHashSet()
+  doAssert manifest{"certification"}{"players"}[0]{"player_id"}.getStr() ==
+    "ecos-player",
+    "certification seat 0 must be the native model player"
   var seated: HashSet[string]
   for entry in manifest{"certification"}{"players"}:
     let pid = entry{"player_id"}.getStr()
     doAssert pid in declared, "certification player " & pid & " is undeclared"
     seated.incl(pid)
-  doAssert seated == ["ecos-steward", "ecos-opportunist"].toHashSet(),
-    "offline certification must seat the scripted baselines; seated " & $seated
+  doAssert seated == declared,
+    "certification must seat every declared player ID; seated " & $seated &
+    " vs declared " & $declared
 
   # ---- the static replay bundle, never a pod -------------------------------
   doAssert manifest{"game"}{"replay_viewer"}{"bundle"}.getStr() ==
