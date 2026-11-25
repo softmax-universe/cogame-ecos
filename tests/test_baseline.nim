@@ -62,7 +62,7 @@ when isMainModule:
           sim.step()
           sim.checkInvariants(label)
       doAssert sim.tick > 0, label & ": no ticks were played"
-      doAssert sim.reason in ["complete", "deadline", "forfeit"],
+      doAssert sim.reason in ["complete", "deadline"],
         label & ": illegal reason " & sim.reason
       # Every doctrine event the episode recorded is legal too — that is what
       # "legal by construction" means, and the clamp is HOW: the recorded

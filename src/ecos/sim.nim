@@ -587,13 +587,6 @@ proc endEarly*(sim: SimServer) =
   ## settle. Unplayed generations contribute 0.
   sim.finish("deadline", "deadline")
 
-proc forfeit*(sim: SimServer) =
-  ## No seat connected. All zero, but results and the replay are still
-  ## written.
-  for species in Species:
-    sim.scores[species] = 0.0
-  sim.finish("forfeit", "forfeit")
-
 proc atGenerationBoundary*(sim: SimServer): bool =
   sim.tick > 0 and sim.tick mod sim.config.ticksPerGeneration == 0
 

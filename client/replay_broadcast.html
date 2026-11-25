@@ -3686,7 +3686,6 @@ body[data-noviewpanel] #viewpanel { display: none !important; }
       return 'COLLAPSE — ' + ending.slice(9).toUpperCase();
     }
     if (ending === 'deadline') return 'DEADLINE';
-    if (ending === 'forfeit') return 'FORFEIT';
     var played = (gens || 10) + ' GENERATIONS';
     return o.draw ? played + ' — TIED' : played;
   }
@@ -3907,8 +3906,6 @@ body[data-noviewpanel] #viewpanel { display: none !important; }
       how.textContent = 'The episode ran out of wall clock and settled on the ' +
         'generations it had played; ' + winName + ' led on integrated ' +
         'biomass (' + winScore + ').';
-    } else if (ending === 'forfeit') {
-      how.textContent = 'No seat connected, so nothing was played.';
     } else {
       how.textContent = (s.gens || 10) + ' generations in balance. ' +
         winName + ' integrated the most biomass (' + winScore + ').';

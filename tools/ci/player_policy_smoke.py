@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run native Ecos host+player round-trip episodes covering valid bare/fenced JSON,
-invalid/ambiguous replies, provider failures, and missing credentials."""
+invalid/ambiguous replies, provider failures, missing credentials, and missing or
+disconnected seats (zero-participant startup, partial startup, and mid-game disconnect)."""
 
 import json
 import os
@@ -22,8 +23,11 @@ def free_port():
         return sock.getsockname()[1]
 
 
-def run_episode(reply_fn=None, with_endpoint=True, expect_failure=False):
+def run_episode(reply_fn=None, with_endpoint=True, expect_failure=False,
+                seat_slots=(0, 1, 2), connect_timeout=10,
+                kill_slot_after_requests=None):
     requests = {"prompt": 0}
+    players = []
     model = None
     if with_endpoint:
         class Stub(BaseHTTPRequestHandler):
@@ -38,6 +42,17 @@ def run_episode(reply_fn=None, with_endpoint=True, expect_failure=False):
                 )
                 requests["prompt"] += 1
                 assert self.headers["x-coworld-player-slot"] == "1"
+                if (kill_slot_after_requests is not None and
+                        requests["prompt"] == kill_slot_after_requests):
+                    # Abruptly disconnect seat 1 mid-turn before replying.
+                    for slot_idx, proc in players:
+                        if slot_idx == 1 and proc.poll() is None:
+                            proc.kill()
+                            break
+                    time.sleep(0.2)
+                    self.send_response(503)
+                    self.end_headers()
+                    return
                 outcome = reply_fn(requests["prompt"])
                 if isinstance(outcome, tuple):
                     status, payload = outcome
@@ -71,7 +86,7 @@ def run_episode(reply_fn=None, with_endpoint=True, expect_failure=False):
                   "promptVariant": "mixed", "promptSeed": 4,
                   "generations": 2, "ticksPerGeneration": 10,
                   "actionTimeoutSeconds": 5, "minTurnSeconds": 0,
-                  "playerConnectTimeoutSeconds": 10, "shutdownGraceSeconds": 0}
+                  "playerConnectTimeoutSeconds": connect_timeout, "shutdownGraceSeconds": 0}
         (root / "config.json").write_text(json.dumps(config))
         game_env = os.environ.copy()
         game_env.update({"COGAME_HOST": "127.0.0.1", "COGAME_PORT": str(port),
@@ -82,7 +97,11 @@ def run_episode(reply_fn=None, with_endpoint=True, expect_failure=False):
                          "COGAME_LOG_URI": (root / "episode.log").as_uri()})
         game = subprocess.Popen([GAME], env=game_env, stdout=(root / "game.log").open("w"),
                                 stderr=subprocess.STDOUT)
-        players = []
+        seat_configs = (
+            {"PLAYER_SCRIPTED": "opportunist"},
+            {"PLAYER_PROMPT": "Keep the ecosystem balanced."},
+            {"PLAYER_SCRIPTED": "steward"},
+        )
         try:
             for _ in range(100):
                 if game.poll() is not None:
@@ -93,11 +112,8 @@ def run_episode(reply_fn=None, with_endpoint=True, expect_failure=False):
                 time.sleep(0.05)
             else:
                 raise AssertionError("game health unavailable")
-            for slot, settings in enumerate((
-                {"PLAYER_SCRIPTED": "opportunist"},
-                {"PLAYER_PROMPT": "Keep the ecosystem balanced."},
-                {"PLAYER_SCRIPTED": "steward"},
-            )):
+            for slot in seat_slots:
+                settings = seat_configs[slot]
                 env = os.environ.copy()
                 for key in ("COWORLD_LLM_ENDPOINT", "ANTHROPIC_API_KEY",
                             "ANTHROPIC_API_KEY_URI", "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
@@ -109,19 +125,22 @@ def run_episode(reply_fn=None, with_endpoint=True, expect_failure=False):
                 )
                 if model is not None:
                     env["COWORLD_LLM_ENDPOINT"] = f"http://127.0.0.1:{model.server_port}"
-                players.append(subprocess.Popen([PLAYER], env=env,
+                players.append((slot, subprocess.Popen([PLAYER], env=env,
                                stdout=(root / f"player-{slot}.log").open("w"),
-                               stderr=subprocess.STDOUT))
+                               stderr=subprocess.STDOUT)))
             game_rc = game.wait(timeout=35)
-            player_rcs = [player.wait(timeout=5) for player in players]
+            player_rcs = {slot: player.wait(timeout=5) for slot, player in players}
             results_path = root / "results.json"
             replay_path = root / "replay.json"
             failure_path = root / "player_failure.json"
             log_text = (root / "episode.log").read_text() if (root / "episode.log").exists() else ""
             if expect_failure:
                 assert game_rc != 0, f"expected failed episode exit != 0, got 0:\n{(root / 'game.log').read_text()}"
-                assert player_rcs[1] != 0, f"expected failing player exit != 0, got {player_rcs}"
-                assert player_rcs[0] == 0 and player_rcs[2] == 0, f"innocent seats should exit 0, got {player_rcs}"
+                if 1 in player_rcs:
+                    assert player_rcs[1] != 0, f"expected failing player exit != 0, got {player_rcs}"
+                for innocent in (0, 2):
+                    if innocent in player_rcs:
+                        assert player_rcs[innocent] == 0, f"innocent seat {innocent} should exit 0, got {player_rcs}"
                 assert not results_path.exists(), f"failed episode must not write numeric results: {results_path.read_text()}"
                 assert not replay_path.exists(), "failed episode must not write scored replay"
                 assert failure_path.exists(), f"missing player_failure.json:\n{(root / 'game.log').read_text()}"
@@ -130,17 +149,20 @@ def run_episode(reply_fn=None, with_endpoint=True, expect_failure=False):
                 return requests, failure, log_text
             else:
                 assert game_rc == 0, (root / "game.log").read_text()
-                for slot, rc in enumerate(player_rcs):
+                for slot, rc in player_rcs.items():
                     assert rc == 0, (root / f"player-{slot}.log").read_text()
                 assert not failure_path.exists(), failure_path.read_text()
                 results = json.loads(results_path.read_text())
                 replay = json.loads(replay_path.read_text())
                 return requests, results, replay
         finally:
-            for process in [*players, game]:
+            for _slot, process in players:
                 if process.poll() is None:
                     process.terminate()
                     process.wait(timeout=5)
+            if game.poll() is None:
+                game.terminate()
+                game.wait(timeout=5)
             if model is not None:
                 model.shutdown()
 
@@ -195,4 +217,44 @@ assert failure["slot"] == 1 and failure["category"] == "infra_error", failure
 assert failure["reason"] == "no LLM credentials configured", failure
 assert "terminated unscored" in log_text, log_text
 
-print("ecos player smoke: valid bare/fenced replies pass; invalid reply, provider failure, and missing credentials terminate unscored with diagnostics")
+# 5. Zero seats connected at startup terminates unscored with infra_error diagnostics (no forfeit/zero results).
+requests, failure, log_text = run_episode(
+    with_endpoint=False,
+    expect_failure=True,
+    seat_slots=(),
+    connect_timeout=1,
+)
+assert requests == {"prompt": 0}, requests
+assert failure["status"] == "failed", failure
+assert failure["slot"] == -1 and failure["category"] == "infra_error", failure
+assert "no seats connected" in failure["reason"], failure
+assert "terminated unscored" in log_text, log_text
+
+# 6. Partially connected roster at startup (seat 1 missing) terminates unscored with infra_error diagnostics.
+requests, failure, log_text = run_episode(
+    with_endpoint=False,
+    expect_failure=True,
+    seat_slots=(0, 2),
+    connect_timeout=1,
+)
+assert requests == {"prompt": 0}, requests
+assert failure["status"] == "failed", failure
+assert failure["slot"] == 1 and failure["seat"] == "Bramble" and failure["role"] == "grazers", failure
+assert failure["category"] == "infra_error", failure
+assert "did not connect" in failure["reason"], failure
+assert "terminated unscored" in log_text, log_text
+
+# 7. Mid-game disconnect of a required model seat terminates unscored with infra_error diagnostics.
+requests, failure, log_text = run_episode(
+    lambda _n: valid_payload,
+    expect_failure=True,
+    kill_slot_after_requests=2,
+)
+assert requests == {"prompt": 2}, requests
+assert failure["status"] == "failed", failure
+assert failure["slot"] == 1 and failure["seat"] == "Bramble" and failure["role"] == "grazers", failure
+assert failure["category"] == "infra_error", failure
+assert "disconnected" in failure["reason"], failure
+assert "terminated unscored" in log_text, log_text
+
+print("ecos player smoke: valid bare/fenced replies pass; invalid reply, provider failure, missing credentials, absent roster, partial roster, and mid-game disconnect terminate unscored with diagnostics")

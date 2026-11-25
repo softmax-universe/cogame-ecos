@@ -72,7 +72,7 @@ when isMainModule:
   doAssert results{"scores"}.len == 3
   doAssert results{"names"}.len == 3
   doAssert results{"win"}.len == 3
-  doAssert results{"reason"}.getStr() in ["complete", "deadline", "forfeit"]
+  doAssert results{"reason"}.getStr() in ["complete", "deadline"]
   doAssert results{"ending"}.getStr() == "ten_generations",
     "the all-steward field must reach ten generations, saw " &
     results{"ending"}.getStr()
